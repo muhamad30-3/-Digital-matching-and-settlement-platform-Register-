@@ -4,7 +4,7 @@ import Reconciliation2 from "./Reconciliation2";
 import {
   Upload, FileSpreadsheet, Download, ChevronDown, X,
   Plus, Trash2, AlertTriangle, Check,
-  Search, Link2, Link2Off, ChevronLeft, CreditCard,
+  Search, Link2, Link2Off, ChevronLeft, ChevronRight, CreditCard,
   Sparkles, Info, Save, Shield, FolderOpen, FolderPlus, RotateCcw, FolderMinus
 } from "lucide-react";
 
@@ -1512,6 +1512,16 @@ export default function App() {
   const [expandedMatchKey, setExpandedMatchKey] = useState<string|null>(null);
   const [expandedUnmatchedCashier, setExpandedUnmatchedCashier] = useState<number|null>(null);
   const [selectedPendingKeys, setSelectedPendingKeys] = useState<Set<string>>(new Set());
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [drawerCashier, setDrawerCashier] = useState<CashierRow | null>(null);
+  const [drawerOldBank, setDrawerOldBank] = useState<BankRow | null>(null);
+  const [drawerNameSearch, setDrawerNameSearch] = useState("");
+  const [drawerAmountFrom, setDrawerAmountFrom] = useState("");
+  const [drawerAmountTo, setDrawerAmountTo] = useState("");
+  const [draggedBankId, setDraggedBankId] = useState<number | null>(null);
+  const [dropTargetKey, setDropTargetKey] = useState<string | null>(null);
+  const [pendingPage, setPendingPage] = useState(1);
+  const PENDING_PAGE_SIZE = 20;
   const [amountTolerancePercent, setAmountTolerancePercent] = useState(0.5);
   const [showSettings, setShowSettings] = useState(false);
   const [resultSearch, setResultSearch] = useState("");
@@ -1920,6 +1930,75 @@ export default function App() {
     setSelectedPendingKeys(prev => { const n = new Set(prev); n.delete(pairKey); return n; });
   };
 
+  const handleReplaceBank = (cashierRow: CashierRow, oldBank: BankRow, newBank: BankRow) => {
+    const oldPairKey = `${cashierRow.id}-${oldBank.id}`;
+    const newPairKey = `${cashierRow.id}-${newBank.id}`;
+    const next = new Set(rejectedPairs);
+    next.add(oldPairKey);
+    next.delete(newPairKey);
+    setRejected(next);
+    handleSaveMatch(cashierRow, newBank);
+    setDrawerOpen(false);
+    setDrawerCashier(null);
+    setDrawerOldBank(null);
+  };
+
+  const drawerBanks = useMemo(() => {
+    if (!drawerCashier) return [];
+    return activeBank
+      .filter(b => {
+        if (b.type !== drawerCashier.type) return false;
+        const pairKey = `${drawerCashier.id}-${b.id}`;
+        if (savedBankIds.has(b.id) && !savedKeys.has(pairKey)) return false;
+        if (b.id === drawerOldBank?.id) return false;
+        const nameMatch = !drawerNameSearch.trim() ||
+          b.description.toLowerCase().includes(drawerNameSearch.trim().toLowerCase());
+        const amt = b.rawAmount;
+        const fromOk = !drawerAmountFrom || amt >= Number(drawerAmountFrom);
+        const toOk = !drawerAmountTo || amt <= Number(drawerAmountTo);
+        return nameMatch && fromOk && toOk;
+      })
+      .sort((a, b) => {
+        const diffA = Math.abs(a.rawAmount - drawerCashier.matchAmount);
+        const diffB = Math.abs(b.rawAmount - drawerCashier.matchAmount);
+        if (diffA !== diffB) return diffA - diffB;
+        return nameSim(drawerCashier.name, b.description) - nameSim(drawerCashier.name, a.description);
+      })
+      .slice(0, 50);
+  }, [drawerCashier, drawerNameSearch, drawerAmountFrom, drawerAmountTo, activeBank, savedBankIds, savedKeys, drawerOldBank, rejectedPairs]);
+
+  const openDrawer = (cashier: CashierRow, oldBank: BankRow) => {
+    setDrawerCashier(cashier);
+    setDrawerOldBank(oldBank);
+    setDrawerNameSearch("");
+    setDrawerAmountFrom("");
+    setDrawerAmountTo("");
+    setDrawerOpen(true);
+  };
+
+  const closeDrawer = () => {
+    setDrawerOpen(false);
+    setDrawerCashier(null);
+    setDrawerOldBank(null);
+    setDrawerNameSearch("");
+    setDrawerAmountFrom("");
+    setDrawerAmountTo("");
+  };
+
+  const handleDropBank = (cashier: CashierRow, oldBank: BankRow, newBankId: number) => {
+    const newBank = activeBank.find(b => b.id === newBankId);
+    if (!newBank) return;
+    handleReplaceBank(cashier, oldBank, newBank);
+    setDropTargetKey(null);
+  };
+
+  const pagedPendingRows = useMemo(() => {
+    const totalPages = Math.max(1, Math.ceil(visiblePendingRows.length / PENDING_PAGE_SIZE));
+    const page = Math.min(pendingPage, totalPages);
+    const start = (page - 1) * PENDING_PAGE_SIZE;
+    return visiblePendingRows.slice(start, start + PENDING_PAGE_SIZE);
+  }, [visiblePendingRows, pendingPage]);
+
   const handleAcceptSuggestion = (cashierRow: CashierRow, bankRow: BankRow) => {
     handleSaveMatch(cashierRow, bankRow);
     setExpandedUnmatchedCashier(null);
@@ -2052,10 +2131,12 @@ export default function App() {
   const visibleUBankRows = uBankRows.filter(filterResult);
 
   useEffect(() => {
-    if (!toast) return;
+    if (toast) return;
     const timer = window.setTimeout(() => setToast(null), 2800);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  useEffect(() => { setPendingPage(1); }, [resultSearch, resultType, minAmount, maxAmount]);
 
   // ─── حفظ/تحميل المشروع كاملاً ─────────────────────────────────────────────
   const saveProject = async (name: string) => {
@@ -2619,10 +2700,11 @@ export default function App() {
                       <th className="px-3 py-2.5 w-10"></th>
                     </tr></thead>
                     <tbody>
-                      {visiblePendingRows.map((r: any, i: number) => {
+                      {pagedPendingRows.map((r: any, i: number) => {
                         const key = `${r.cashier.id}-${r.bank.id}`;
                         const isExpanded = expandedMatchKey === key;
                         const isSelected = selectedPendingKeys.has(key);
+                        const isDropTarget = dropTargetKey === key;
                         const typeColor = r.cashier.type === "مدفوع" ? "text-red-600" : "text-green-600";
                         const matchTypeLabel = r.matchType === "firstSecond" ? "👤 الأول+الثاني" :
                                               r.matchType === "fourthName" ? "👤 الرابع" :
@@ -2634,7 +2716,7 @@ export default function App() {
                         const visaNum = extractVisaNumber(r.cashier.rawName);
                         return (
                           <React.Fragment key={i}>
-                            <tr className={`border-t transition-colors ${isSelected ? "bg-blue-50/70" : isExpanded ? "bg-blue-50" : isFromHeld ? "bg-purple-50/50 hover:bg-purple-50" : r.isApprox ? "bg-amber-50/30 hover:bg-amber-50/60" : "hover:bg-muted/20"}`}>
+                            <tr className={`border-t transition-colors ${isDropTarget ? "bg-green-100 ring-2 ring-green-400 ring-inset" : isSelected ? "bg-blue-50/70" : isExpanded ? "bg-blue-50" : isFromHeld ? "bg-purple-50/50 hover:bg-purple-50" : r.isApprox ? "bg-amber-50/30 hover:bg-amber-50/60" : "hover:bg-muted/20"}`}>
                               <td className="px-3 py-2.5">
                                 <div onClick={() => togglePendingSelect(key)}
                                   className={`w-4 h-4 rounded border-2 flex items-center justify-center cursor-pointer transition-colors ${isSelected?"bg-blue-600 border-blue-600":"border-border"}`}>
@@ -2653,11 +2735,25 @@ export default function App() {
                                   <span className="mr-1.5 text-[9px] px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 border border-teal-300">💳 {visaNum}</span>
                                 )}
                               </td>
-                              <td className="px-3 py-2.5 text-muted-foreground text-xs">
-                                {r.bank.description}
-                                {r.bank.accountType && (
-                                  <div className="text-[10px] text-muted-foreground">{r.bank.accountType}</div>
-                                )}
+                              <td
+                                className={`px-3 py-2.5 text-muted-foreground text-xs transition-colors ${isDropTarget ? "bg-green-100" : ""}`}
+                                onDragOver={(e) => { if (draggedBankId !== null) { e.preventDefault(); setDropTargetKey(key); } }}
+                                onDragLeave={() => { if (dropTargetKey === key) setDropTargetKey(null); }}
+                                onDrop={(e) => { e.preventDefault(); if (draggedBankId !== null) { handleDropBank(r.cashier, r.bank, draggedBankId); } setDraggedBankId(null); }}
+                              >
+                                <div className="flex items-center gap-1.5">
+                                  <span className="flex-1">{r.bank.description}</span>
+                                  {r.bank.accountType && (
+                                    <span className="text-[10px] text-muted-foreground">{r.bank.accountType}</span>
+                                  )}
+                                  <button
+                                    onClick={() => openDrawer(r.cashier, r.bank)}
+                                    title="افتح قائمة الحوالات للبحث والسحب"
+                                    className="px-1.5 py-0.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded text-[10px] font-medium hover:bg-indigo-100 transition-colors flex items-center gap-0.5 shrink-0"
+                                  >
+                                    <Search className="w-2.5 h-2.5"/>بحث وسحب
+                                  </button>
+                                </div>
                               </td>
                               <td className={`px-3 py-2.5 text-xs font-semibold ${typeColor}`}>{r.cashier.type}</td>
                               <td className="px-3 py-2.5 font-mono font-bold text-blue-700">
@@ -2751,9 +2847,30 @@ export default function App() {
                           </React.Fragment>
                         );
                       })}
-                      {!visiblePendingRows.length && <tr><td colSpan={8} className="py-10 text-center text-muted-foreground text-xs">لا توجد مطابقات منتظرة تطابق الفلاتر</td></tr>}
+                      {!pagedPendingRows.length && <tr><td colSpan={8} className="py-10 text-center text-muted-foreground text-xs">لا توجد مطابقات منتظرة تطابق الفلاتر</td></tr>}
                     </tbody>
                   </table>
+                  {visiblePendingRows.length > PENDING_PAGE_SIZE && (
+                    <div className="flex items-center justify-center gap-3 px-4 py-3 border-t border-border bg-muted/30 text-xs">
+                      <button
+                        onClick={() => setPendingPage(p => Math.max(1, p - 1))}
+                        disabled={pendingPage <= 1}
+                        className="px-3 py-1.5 rounded-lg border border-border bg-card disabled:opacity-40 hover:bg-muted/50 transition-colors flex items-center gap-1"
+                      >
+                        <ChevronRight className="w-3.5 h-3.5"/>السابق
+                      </button>
+                      <span className="text-muted-foreground">
+                        صفحة {pendingPage} من {Math.max(1, Math.ceil(visiblePendingRows.length / PENDING_PAGE_SIZE))} · عرض {pagedPendingRows.length} من {visiblePendingRows.length}
+                      </span>
+                      <button
+                        onClick={() => setPendingPage(p => Math.min(Math.max(1, Math.ceil(visiblePendingRows.length / PENDING_PAGE_SIZE)), p + 1))}
+                        disabled={pendingPage >= Math.ceil(visiblePendingRows.length / PENDING_PAGE_SIZE)}
+                        className="px-3 py-1.5 rounded-lg border border-border bg-card disabled:opacity-40 hover:bg-muted/50 transition-colors flex items-center gap-1"
+                      >
+                        التالي<ChevronLeft className="w-3.5 h-3.5"/>
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -3058,6 +3175,113 @@ export default function App() {
                   </tbody>
                 </table>
               )}
+            </div>
+          </div>
+        )}
+
+        {/* ─── Side Drawer: بحث الحوالات وسحبها ─────────────────────────────────── */}
+        {drawerOpen && drawerCashier && (
+          <div className="fixed inset-0 z-40 flex" dir="rtl">
+            <div className="flex-1 bg-black/30" onClick={closeDrawer} />
+            <div className="w-[420px] max-w-[90vw] bg-card border-r border-border shadow-2xl flex flex-col h-full">
+              <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-border bg-muted/30">
+                <div className="min-w-0">
+                  <div className="text-xs text-muted-foreground">قائمة سحب الحوالات</div>
+                  <div className="text-sm font-bold truncate">{drawerCashier.name}</div>
+                  <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${drawerCashier.type === "مدفوع" ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700"}`}>{drawerCashier.type}</span>
+                    <span className="text-sm font-mono font-bold text-blue-700">{fmtNum(drawerCashier.matchAmount)}</span>
+                  </div>
+                  {drawerOldBank && (
+                    <div className="text-[10px] text-muted-foreground mt-1">
+                      الحوالة الحالية: <span className="text-muted-foreground">{drawerOldBank.description} ({fmtNum(drawerOldBank.rawAmount)})</span>
+                    </div>
+                  )}
+                </div>
+                <button onClick={closeDrawer} className="p-1.5 text-muted-foreground hover:bg-muted rounded-lg transition-colors shrink-0">
+                  <X className="w-4 h-4"/>
+                </button>
+              </div>
+
+              <div className="px-4 py-3 border-b border-border space-y-2 bg-card">
+                <div className="relative">
+                  <Search className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground"/>
+                  <input
+                    value={drawerNameSearch}
+                    onChange={e => setDrawerNameSearch(e.target.value)}
+                    placeholder="بحث بالاسم..."
+                    className="w-full pl-3 pr-9 py-2 text-sm border border-border rounded-lg bg-input-background focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    value={drawerAmountFrom}
+                    onChange={e => setDrawerAmountFrom(e.target.value)}
+                    placeholder="من مبلغ"
+                    className="flex-1 rounded-lg border border-border bg-input-background px-2.5 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                  <span className="text-muted-foreground text-xs">إلى</span>
+                  <input
+                    type="number"
+                    value={drawerAmountTo}
+                    onChange={e => setDrawerAmountTo(e.target.value)}
+                    placeholder="إلى مبلغ"
+                    className="flex-1 rounded-lg border border-border bg-input-background px-2.5 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                </div>
+                <div className="text-[10px] text-muted-foreground">
+                  اسحب الحوالة من القائمة وأفلتها فوق خانة "بيان البنك" في الجدول لاستبدالها. أو اضغط "استبدال" مباشرة.
+                </div>
+              </div>
+
+              <div className="flex-1 overflow-y-auto">
+                {drawerBanks.length === 0 ? (
+                  <div className="p-8 text-center text-xs text-muted-foreground">
+                    لا توجد حوالات تطابق البحث. جرّب تعديل الاسم أو المبلغ.
+                  </div>
+                ) : (
+                  <div className="divide-y divide-border">
+                    {drawerBanks.map(b => {
+                      const diff = Math.abs(b.rawAmount - drawerCashier.matchAmount);
+                      const exact = diff <= 0.01;
+                      const sim = nameSim(drawerCashier.name, b.description);
+                      const isDragged = draggedBankId === b.id;
+                      return (
+                        <div
+                          key={b.id}
+                          draggable
+                          onDragStart={() => setDraggedBankId(b.id)}
+                          onDragEnd={() => { setDraggedBankId(null); setDropTargetKey(null); }}
+                          className={`px-4 py-3 cursor-grab hover:bg-blue-50/50 transition-colors ${isDragged ? "opacity-50" : ""}`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <div className="flex-1 min-w-0">
+                              <div className="text-sm font-medium truncate">{b.description}</div>
+                              <div className="flex items-center gap-2 mt-1 flex-wrap">
+                                <span className="font-mono font-bold text-blue-700 text-sm">{fmtNum(b.rawAmount)}</span>
+                                {exact ? (
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-100 text-green-700 border border-green-300">نفس المبلغ</span>
+                                ) : (
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 border border-amber-300">فرق: {fmtNum(diff)}</span>
+                                )}
+                                <span className="text-[10px] text-muted-foreground">تشابه: {(sim*100).toFixed(0)}%</span>
+                                {b.accountType && <span className="text-[10px] text-muted-foreground">| {b.accountType}</span>}
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => drawerOldBank && handleReplaceBank(drawerCashier, drawerOldBank, b)}
+                              className="px-2.5 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 transition-colors shrink-0 flex items-center gap-1"
+                            >
+                              <Check className="w-3 h-3"/>استبدال
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
