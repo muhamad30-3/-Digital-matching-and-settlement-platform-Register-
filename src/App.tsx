@@ -1992,13 +1992,6 @@ export default function App() {
     setDropTargetKey(null);
   };
 
-  const pagedPendingRows = useMemo(() => {
-    const totalPages = Math.max(1, Math.ceil(visiblePendingRows.length / PENDING_PAGE_SIZE));
-    const page = Math.min(pendingPage, totalPages);
-    const start = (page - 1) * PENDING_PAGE_SIZE;
-    return visiblePendingRows.slice(start, start + PENDING_PAGE_SIZE);
-  }, [visiblePendingRows, pendingPage]);
-
   const handleAcceptSuggestion = (cashierRow: CashierRow, bankRow: BankRow) => {
     handleSaveMatch(cashierRow, bankRow);
     setExpandedUnmatchedCashier(null);
@@ -2127,6 +2120,12 @@ export default function App() {
   };
   const visibleSavedRows = savedRows.filter(filterResult);
   const visiblePendingRows = pendingRows.filter(filterResult);
+  const pagedPendingRows = useMemo(() => {
+    const totalPages = Math.max(1, Math.ceil(visiblePendingRows.length / PENDING_PAGE_SIZE));
+    const page = Math.min(pendingPage, totalPages);
+    const start = (page - 1) * PENDING_PAGE_SIZE;
+    return visiblePendingRows.slice(start, start + PENDING_PAGE_SIZE);
+  }, [visiblePendingRows, pendingPage]);
   const visibleUCashierRows = uCashierRows.filter(filterResult);
   const visibleUBankRows = uBankRows.filter(filterResult);
 
