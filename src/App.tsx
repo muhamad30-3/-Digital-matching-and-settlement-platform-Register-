@@ -5,7 +5,8 @@ import {
   Upload, FileSpreadsheet, Download, ChevronDown, X,
   Plus, Trash2, AlertTriangle, Check,
   Search, Link2, Link2Off, ChevronLeft, ChevronRight, CreditCard,
-  Sparkles, Info, Save, Shield, FolderOpen, FolderPlus, RotateCcw, FolderMinus
+  Sparkles, Info, Save, Shield, FolderOpen, FolderPlus, RotateCcw, FolderMinus,
+  GripVertical, Landmark, Users
 } from "lucide-react";
 
 // ─── Excel helpers ────────────────────────────────────────────────────────────
@@ -90,16 +91,12 @@ async function storageListKeys(prefix: string): Promise<string[]> {
 }
 
 // ─── Visa detection ────────────────────────────────────────────────────────────
-// يكتشف الفواتير اللي بتحتوي على نمط: اسم/رقم (4 أرقام) أو اسم-رقم (4 أرقام)
-// مثال: "احمد دحلان/9118" أو "احمد دحلان-9118"
-// الرقم بكون من 4 أرقام بالضبط
 const VISA_NUM_RE = /[\/\-]\s*(\d{4})(?!\d)/;
 function extractVisaNumber(rawName: string): string | null {
   const m = rawName.match(VISA_NUM_RE);
   return m ? m[1] : null;
 }
 function extractVisaName(rawName: string): string {
-  // يشيل رقم الفيزا من الاسم عشان يظهر نظيف
   return rawName.replace(VISA_NUM_RE, "").replace(/\s+/g, " ").trim();
 }
 
@@ -236,6 +233,16 @@ interface VisaItem {
   source?: "pending" | "unmatched" | "saved" | "manual";
 }
 
+interface HeldItem {
+  id: string;
+  kind: "bank" | "cashier";
+  refId: number;
+  fileSessionId: number;
+  data: BankRow | CashierRow;
+  heldAt: string;
+  note?: string;
+}
+
 function normAccountType(s: string): string {
   return (s || "").toString().trim().toLowerCase().replace(/\s+/g, " ");
 }
@@ -335,17 +342,11 @@ function reconcile(
   const savedCashierIds = new Set(savedMatches.map(s => s.cashierId));
   const savedBankIds = new Set(savedMatches.map(s => s.bankId));
 
-  // 1. Saved matches
   savedMatches.forEach(sm => {
     const bankRow = bank.find(b => b.id === sm.bankId);
     const cashierRow = cashier.find(c => c.id === sm.cashierId);
     if (bankRow && cashierRow) {
-      results.push({
-        type: "saved",
-        bank: bankRow,
-        cashier: cashierRow,
-        savedMatch: sm
-      });
+      results.push({ type: "saved", bank: bankRow, cashier: cashierRow, savedMatch: sm });
       usedBank.add(bankRow.id);
       usedCashier.add(cashierRow.id);
     }
@@ -358,7 +359,6 @@ function reconcile(
     }
   });
 
-  // 3. Direct 1-to-1 match
   cashier.forEach(c => {
     if (usedCashier.has(c.id) || savedCashierIds.has(c.id) || visaCashierIds.has(c.id)) return;
     let bestMatch: { bank: BankRow; isApprox: boolean; matchType: string } | null = null;
@@ -407,7 +407,6 @@ function reconcile(
     }
   });
 
-  // 4. Bundle matching
   const remC = cashier.filter(c => !usedCashier.has(c.id) && !savedCashierIds.has(c.id) && !visaCashierIds.has(c.id));
   const remB = bank.filter(b => !usedBank.has(b.id) && !savedBankIds.has(b.id));
 
@@ -461,7 +460,6 @@ function reconcile(
     }
   });
 
-  // 5. Unmatched
   cashier.forEach(c => {
     if (usedCashier.has(c.id) || savedCashierIds.has(c.id) || visaCashierIds.has(c.id)) return;
     const hasAmt = bank.some(b => !usedBank.has(b.id) && !savedBankIds.has(b.id) &&
@@ -630,7 +628,7 @@ function sanitizeSheetName(name: string, used: Set<string>): string {
   return final;
 }
 
-function doExport(results: MatchResult[], savedMatches: SavedMatch[], visaItems: VisaItem[], resumeData?: ResumeData) {
+function doExport(results: MatchResult[], savedMatches: SavedMatch[], visaItems: VisaItem[], heldItems: HeldItem[], resumeData?: ResumeData) {
   const wb = XLSX.utils.book_new();
   const usedSheetNames = new Set<string>();
   const add=(name:string,hdrs:string[],rows:unknown[][])=>{
@@ -642,29 +640,17 @@ function doExport(results: MatchResult[], savedMatches: SavedMatch[], visaItems:
   const savedRows = results.filter(r=>r.type==="saved").map((r:any) => {
     const sm = r.savedMatch as SavedMatch;
     return [
-      r.cashier.name,
-      r.bank.description,
-      sm.type,
-      r.bank.rawAmount,
-      r.cashier.amount,
-      sm.isAmountDiff ? "نعم" : "لا",
-      sm.isNameDiff ? "نعم" : "لا",
-      r.bank.accountType || "—",
-      r.cashier.accountType || "—",
-      sm.isAccountTypeDiff ? "نعم" : "لا",
-      sm.isManual ? "يدوي" : "تلقائي",
-      sm.note || "",
-      sm.matchScore ?? "",
-      sm.editorNotes || "",
-      r.bank.date,
-      r.cashier.date,
-      sm.savedAt
+      r.cashier.name, r.bank.description, sm.type, r.bank.rawAmount, r.cashier.amount,
+      sm.isAmountDiff ? "نعم" : "لا", sm.isNameDiff ? "نعم" : "لا",
+      r.bank.accountType || "—", r.cashier.accountType || "—",
+      sm.isAccountTypeDiff ? "نعم" : "لا", sm.isManual ? "يدوي" : "تلقائي",
+      sm.note || "", sm.matchScore ?? "", sm.editorNotes || "",
+      r.bank.date, r.cashier.date, sm.savedAt
     ];
   });
-  add("✅ المسيفات (المؤكدة)",
+  add("✅ المطابقات (المؤكدة)",
     ["البيان (الكاشير)","بيان البنك","النوع","مبلغ البنك","مبلغ الكاشير","اختلاف مبلغ","اختلاف اسم","نوع حساب البنك","نوع حساب الكاشير","اختلاف نوع حساب","نوع المطابقة","ملاحظة","درجة التطابق","ملاحظات المحرر","ت.البنك","ت.الكاشير","تاريخ الحفظ"],
-    savedRows
-  );
+    savedRows);
 
   const needsReview = results.filter(r=>r.type==="saved").filter((r:any) => {
     const sm = r.savedMatch as SavedMatch;
@@ -673,117 +659,56 @@ function doExport(results: MatchResult[], savedMatches: SavedMatch[], visaItems:
   const amountDiffRows = needsReview.map((r:any) => {
     const sm = r.savedMatch as SavedMatch;
     const diff = r.bank.rawAmount - r.cashier.amount;
-    const issues = [
-      sm.isAmountDiff ? "فرق مبلغ" : null,
-      sm.isAccountTypeDiff ? "فرق نوع حساب" : null,
-    ].filter(Boolean).join(" + ");
-    return [
-      r.cashier.name,
-      r.bank.description,
-      sm.type,
-      r.bank.rawAmount,
-      r.cashier.amount,
-      sm.isAmountDiff ? fmtNum(diff) : "0",
-      r.bank.accountType || "—",
-      r.cashier.accountType || "—",
-      issues,
-      sm.isManual ? "يدوي" : "تلقائي",
-      sm.note || "",
-      r.bank.date,
-      r.cashier.date
-    ];
+    const issues = [sm.isAmountDiff ? "فرق مبلغ" : null, sm.isAccountTypeDiff ? "فرق نوع حساب" : null].filter(Boolean).join(" + ");
+    return [r.cashier.name, r.bank.description, sm.type, r.bank.rawAmount, r.cashier.amount,
+      sm.isAmountDiff ? fmtNum(diff) : "0", r.bank.accountType || "—", r.cashier.accountType || "—",
+      issues, sm.isManual ? "يدوي" : "تلقائي", sm.note || "", r.bank.date, r.cashier.date];
   });
   add("⚠️ فروقات تحتاج تدقيق",
     ["البيان (الكاشير)","بيان البنك","النوع","مبلغ البنك","مبلغ الكاشير","الفرق (بنك - كاشير)","نوع حساب البنك","نوع حساب الكاشير","نوع المشكلة","نوع المطابقة","ملاحظة","ت.البنك","ت.الكاشير"],
-    amountDiffRows
-  );
+    amountDiffRows);
 
   const pendingRows = results.filter(r=>r.type==="pending").map((r:any) => [
-    r.cashier.name,
-    r.bank.description,
-    r.cashier.type,
-    r.bank.rawAmount,
-    r.cashier.amount,
-    r.isApprox ? "تقريبي" : "ممتاز",
-    r.matchType || "عادي",
-    r.amountDiff ? fmtNum(r.amountDiff) : "0",
-    r.bank.accountType || "—",
-    r.cashier.accountType || "—",
-    r.accountTypeDiff ? "نعم" : "لا",
-    r.isBundled ? "تجميع" : "فردي",
-    r.bank.date,
-    r.cashier.date
+    r.cashier.name, r.bank.description, r.cashier.type, r.bank.rawAmount, r.cashier.amount,
+    r.isApprox ? "تقريبي" : "ممتاز", r.matchType || "عادي", r.amountDiff ? fmtNum(r.amountDiff) : "0",
+    r.bank.accountType || "—", r.cashier.accountType || "—", r.accountTypeDiff ? "نعم" : "لا",
+    r.isBundled ? "تجميع" : "فردي", r.bank.date, r.cashier.date
   ]);
   add("⏳ مطابقات منتظرة (غير محفوظة)",
     ["البيان (الكاشير)","بيان البنك","النوع","مبلغ البنك","مبلغ الكاشير","الحالة","نوع المطابقة","فرق المبلغ","نوع حساب البنك","نوع حساب الكاشير","اختلاف نوع حساب","نوع التجميع","ت.البنك","ت.الكاشير"],
-    pendingRows
-  );
+    pendingRows);
 
-const manualRows = results
-  .filter((r): r is Extract<MatchResult, { type: "saved" }> => r.type === "saved" && Boolean(r.savedMatch?.isManual))
-  .map((r) => {
-    const sm = r.savedMatch;
-    return [
-      r.cashier.name,
-      r.bank.description,
-      sm.type,
-      r.bank.rawAmount,
-      r.cashier.amount,
-      r.bank.date,
-      r.cashier.date,
-      sm.note || ""
-    ];
-  });
+  const manualRows = results
+    .filter((r): r is Extract<MatchResult, { type: "saved" }> => r.type === "saved" && Boolean(r.savedMatch?.isManual))
+    .map((r) => {
+      const sm = r.savedMatch;
+      return [r.cashier.name, r.bank.description, sm.type, r.bank.rawAmount, r.cashier.amount, r.bank.date, r.cashier.date, sm.note || ""];
+    });
   add("🛠️ مطابقات يدوية (محفوظة)",
     ["البيان (الكاشير)","بيان البنك","النوع","مبلغ البنك","مبلغ الكاشير","ت.البنك","ت.الكاشير","ملاحظة"],
-    manualRows
-  );
+    manualRows);
 
-  // شيت الفيزا
-  const visaRows = visaItems.map(v => [
-    v.name,
-    v.visaNumber,
-    v.type,
-    v.amount,
-    v.date,
-    v.note || "",
-    v.movedAt
-  ]);
-  add("💳 الفيزا",
-    ["الاسم","رقم الفيزا","النوع","المبلغ","التاريخ","ملاحظة","تاريخ النقل"],
-    visaRows
-  );
+  const visaRows = visaItems.map(v => [v.name, v.visaNumber, v.type, v.amount, v.date, v.note || "", v.movedAt]);
+  add("💳 الفيزا", ["الاسم","رقم الفيزا","النوع","المبلغ","التاريخ","ملاحظة","تاريخ النقل"], visaRows);
 
   const uCashier = results.filter(r=>r.type==="unmatchedCashier").map((r:any) => [
-    r.cashier.name,
-    r.cashier.type,
-    r.cashier.amount,
-    r.cashier.date,
-    r.reason
-  ]);
-  add("❌ مشاكل كاشير (غير متطابق)",
-    ["البيان","النوع","المبلغ","التاريخ","السبب"],
-    uCashier
-  );
+    r.cashier.name, r.cashier.type, r.cashier.amount, r.cashier.accountType || "—", r.cashier.date, r.reason]);
+  add("❌ مشاكل كاشير (غير متطابق)", ["اسم الزبون","النوع","المبلغ","نوع الحساب","التاريخ","السبب"], uCashier);
 
   const uBank = results.filter(r=>r.type==="unmatchedBank").map((r:any) => [
-    r.bank.description,
-    r.bank.type,
-    r.bank.rawAmount,
-    r.bank.date,
-    r.reason
-  ]);
-  add("🏛️ مشاكل بنك (غير متطابق)",
-    ["بيان البنك","النوع","المبلغ","التاريخ","السبب"],
-    uBank
-  );
+    r.bank.description, r.bank.type, r.bank.rawAmount, r.bank.accountType || "—", r.bank.date, r.reason]);
+  add("🏛️ مشاكل بنك (غير متطابق)", ["اسم صاحب الحوالة","النوع","المبلغ","نوع الحساب","التاريخ","السبب"], uBank);
+
+  const heldRows = heldItems.map(h => {
+    const isBank = h.kind === "bank";
+    const label = isBank ? (h.data as BankRow).description : (h.data as CashierRow).name;
+    const amt = isBank ? (h.data as BankRow).rawAmount : (h.data as CashierRow).amount;
+    return [ isBank ? "بنك" : "كاشير", label, h.data.type, amt, h.data.accountType || "—", h.heldAt, h.note || "" ];
+  });
+  add("🗂️ المعلقات", ["المصدر","البيان","النوع","المبلغ","نوع الحساب","تاريخ التعليق","ملاحظة"], heldRows);
 
   if (resumeData) {
-    try {
-      embedResumeSheet(wb, resumeData);
-    } catch (e) {
-      console.error("تعذّر تضمين بيانات الاستكمال بالملف:", e);
-    }
+    try { embedResumeSheet(wb, resumeData); } catch (e) { console.error("تعذّر تضمين بيانات الاستكمال بالملف:", e); }
   }
   XLSX.writeFile(wb,"تقرير_التسوية.xlsx");
 }
@@ -846,7 +771,6 @@ async function extractResumeData(file: File): Promise<ResumeData | null> {
     return null;
   }
 }
-
 
 function autoDetect(headers: string[], hints: string[]): string {
   const scores=headers.map(h=>({h,s:hints.reduce((a,hint)=>a+(h.toLowerCase().includes(hint.toLowerCase())?1:0),0)})).sort((a,b)=>b.s-a.s);
@@ -1117,7 +1041,7 @@ function ManualWorkbench({
           <button onClick={handleMatch}
             className="w-full py-3.5 rounded-xl font-medium flex items-center justify-center gap-2 text-sm transition-colors bg-green-600 hover:bg-green-700 text-white">
             <Save className="w-5 h-5"/>
-            حفظ {selectedBankIds.size} حوالة بنكية ↔ {selectedCashierIds.size} فاتورة كاشير (تؤكد فوراً)
+            حفظ {selectedBankIds.size} حوالة بنكية ↔ {selectedCashierIds.size} فاتورة كاشier (تؤكد فوراً)
             {!amtMatch&&<span className="text-xs opacity-80">(مجاميع مختلفة)</span>}
           </button>
         )}
@@ -1363,16 +1287,6 @@ interface SavedProject {
   returnedHeldCashier?: CashierRow[];
 }
 
-interface HeldItem {
-  id: string;
-  kind: "bank" | "cashier";
-  refId: number;
-  fileSessionId: number;
-  data: BankRow | CashierRow;
-  heldAt: string;
-  note?: string;
-}
-
 async function loadProjectsList(): Promise<SavedProject[]> {
   return storageGet<SavedProject[]>("recon_projects", []);
 }
@@ -1478,6 +1392,123 @@ function FilterBar({
   );
 }
 
+// ─── لوحة السحب والاستبدال (تظهر جمب الجدول وتزيحه) ──────────────────────────
+function MatchDrawer({
+  mode, cashier, oldBank, nameSearch, amountFrom, amountTo, banks, cashiers, draggedItemId,
+  onNameSearch, onAmountFrom, onAmountTo, onDragStart, onDragEnd, onReplaceBank, onReplaceCashier, onClose
+}: {
+  mode: "bank" | "cashier"; cashier: CashierRow; oldBank: BankRow;
+  nameSearch: string; amountFrom: string; amountTo: string;
+  banks: BankRow[]; cashiers: CashierRow[]; draggedItemId: number | null;
+  onNameSearch: (v:string)=>void; onAmountFrom: (v:string)=>void; onAmountTo: (v:string)=>void;
+  onDragStart: (id:number)=>void; onDragEnd: ()=>void;
+  onReplaceBank: (b:BankRow)=>void; onReplaceCashier: (c:CashierRow)=>void; onClose: ()=>void;
+}) {
+  return (
+    <div className="w-1/2 shrink-0 bg-white border border-border rounded-xl shadow-lg flex flex-col overflow-hidden isolate self-stretch" dir="rtl">
+      <div className={`flex items-center justify-between gap-3 px-4 py-3.5 text-white shrink-0 ${mode === "bank" ? "bg-gradient-to-l from-blue-600 to-indigo-600" : "bg-gradient-to-l from-emerald-600 to-teal-600"}`}>
+        <div className="min-w-0 flex items-center gap-2.5">
+          <span className="flex items-center justify-center w-9 h-9 rounded-xl bg-white/15 shrink-0">
+            {mode === "bank" ? <Landmark className="w-5 h-5"/> : <Users className="w-5 h-5"/>}
+          </span>
+          <div className="min-w-0">
+            <div className="text-[11px] text-white/80">{mode === "bank" ? "قائمة سحب الحوالات" : "قائمة سحب فواتير الكاشير"}</div>
+            <div className="text-sm font-bold truncate">{mode === "bank" ? cashier.name : oldBank.description}</div>
+          </div>
+        </div>
+        <button onClick={onClose} className="p-1.5 hover:bg-white/15 rounded-lg transition-colors shrink-0"><X className="w-4 h-4"/></button>
+      </div>
+
+      <div className="px-4 py-3 border-b border-border bg-slate-50 space-y-1.5 shrink-0">
+        <div className="flex items-center gap-2 flex-wrap text-xs">
+          <span className={`font-semibold px-2 py-0.5 rounded-full ${(mode === "bank" ? cashier.type : oldBank.type) === "مدفوع" ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700"}`}>
+            {mode === "bank" ? cashier.type : oldBank.type}
+          </span>
+          <span className="font-mono font-bold text-indigo-700">{fmtNum(mode === "bank" ? cashier.matchAmount : oldBank.rawAmount)}</span>
+        </div>
+        <div className="text-[11px] text-muted-foreground">
+          {mode === "bank"
+            ? <>سيتم استبدال الحوالة الحالية: <span className="text-foreground font-medium">{oldBank.description}</span> ({fmtNum(oldBank.rawAmount)})</>
+            : <>سيتم استبدال الفاتورة الحالية: <span className="text-foreground font-medium">{cashier.name}</span> ({fmtNum(cashier.matchAmount)})</>}
+        </div>
+      </div>
+
+      <div className="px-4 py-3 border-b border-border space-y-2 bg-white shrink-0">
+        <div className="relative">
+          <Search className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground"/>
+          <input value={nameSearch} onChange={e => onNameSearch(e.target.value)}
+            placeholder={mode === "bank" ? "بحث ببيان الحوالة..." : "بحث باسم الفاتورة..."}
+            className="w-full pl-3 pr-9 py-2 text-sm border border-border rounded-lg bg-input-background focus:outline-none focus:ring-1 focus:ring-ring"/>
+        </div>
+        <div className="flex items-center gap-2">
+          <input type="number" value={amountFrom} onChange={e => onAmountFrom(e.target.value)} placeholder="من مبلغ"
+            className="flex-1 rounded-lg border border-border bg-input-background px-2.5 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring"/>
+          <span className="text-muted-foreground text-xs">إلى</span>
+          <input type="number" value={amountTo} onChange={e => onAmountTo(e.target.value)} placeholder="إلى مبلغ"
+            className="flex-1 rounded-lg border border-border bg-input-background px-2.5 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring"/>
+        </div>
+        <div className="text-[10px] text-muted-foreground leading-relaxed">
+          اسحب {mode === "bank" ? "الحوالة" : "الفاتورة"} من القائمة وأفلتها فوق خانة {mode === "bank" ? "«بيان البنك»" : "«البيان (الكاشير)»"} بالجدول جنب هاي اللوحة، أو اضغط زر "استبدال".
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto bg-white">
+        {mode === "bank" ? (
+          banks.length === 0 ? (
+            <div className="flex flex-col items-center justify-center gap-2 p-10 text-center text-xs text-muted-foreground"><Search className="w-8 h-8 opacity-30"/>لا توجد حوالات تطابق البحث.</div>
+          ) : banks.map(b => {
+            const diff = Math.abs(b.rawAmount - cashier.matchAmount);
+            const exact = diff <= 0.01;
+            const sim = nameSim(cashier.name, b.description);
+            const isDragged = draggedItemId === b.id;
+            return (
+              <div key={b.id} draggable onDragStart={() => onDragStart(b.id)} onDragEnd={onDragEnd}
+                className={`group flex items-center gap-3 px-4 py-3 border-b border-border last:border-b-0 cursor-grab active:cursor-grabbing hover:bg-blue-50 transition-colors ${isDragged ? "opacity-40" : ""}`}>
+                <GripVertical className="w-4 h-4 text-muted-foreground/40 shrink-0"/>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium truncate">{b.description}</div>
+                  <div className="flex items-center gap-2 mt-1 flex-wrap">
+                    <span className="font-mono font-bold text-blue-700 text-sm">{fmtNum(b.rawAmount)}</span>
+                    {exact ? <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 border border-green-300">نفس المبلغ</span>
+                      : <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 border border-amber-300">فرق: {fmtNum(diff)}</span>}
+                    <span className="text-[10px] text-muted-foreground">تشابه: {(sim*100).toFixed(0)}%</span>
+                  </div>
+                </div>
+                <button onClick={() => onReplaceBank(b)} className="px-2.5 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 transition-colors shrink-0">استبدال</button>
+              </div>
+            );
+          })
+        ) : (
+          cashiers.length === 0 ? (
+            <div className="flex flex-col items-center justify-center gap-2 p-10 text-center text-xs text-muted-foreground"><Search className="w-8 h-8 opacity-30"/>لا توجد فواتير كاشير تطابق البحث.</div>
+          ) : cashiers.map(c => {
+            const diff = Math.abs(c.matchAmount - oldBank.rawAmount);
+            const exact = diff <= 0.01;
+            const sim = nameSim(oldBank.description, c.name);
+            const isDragged = draggedItemId === c.id;
+            return (
+              <div key={c.id} draggable onDragStart={() => onDragStart(c.id)} onDragEnd={onDragEnd}
+                className={`group flex items-center gap-3 px-4 py-3 border-b border-border last:border-b-0 cursor-grab active:cursor-grabbing hover:bg-emerald-50 transition-colors ${isDragged ? "opacity-40" : ""}`}>
+                <GripVertical className="w-4 h-4 text-muted-foreground/40 shrink-0"/>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium truncate">{c.name}</div>
+                  <div className="flex items-center gap-2 mt-1 flex-wrap">
+                    <span className="font-mono font-bold text-emerald-700 text-sm">{fmtNum(c.matchAmount)}</span>
+                    {exact ? <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 border border-green-300">نفس المبلغ</span>
+                      : <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 border border-amber-300">فرق: {fmtNum(diff)}</span>}
+                    <span className="text-[10px] text-muted-foreground">تشابه: {(sim*100).toFixed(0)}%</span>
+                  </div>
+                </div>
+                <button onClick={() => onReplaceCashier(c)} className="px-2.5 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 transition-colors shrink-0">استبدال</button>
+              </div>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
 type PageId = "main" | "manual" | "assist" | "recon2";
 
@@ -1512,6 +1543,7 @@ export default function App() {
   const [expandedMatchKey, setExpandedMatchKey] = useState<string|null>(null);
   const [expandedUnmatchedCashier, setExpandedUnmatchedCashier] = useState<number|null>(null);
   const [selectedPendingKeys, setSelectedPendingKeys] = useState<Set<string>>(new Set());
+
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerMode, setDrawerMode] = useState<"bank" | "cashier">("bank");
   const [drawerCashier, setDrawerCashier] = useState<CashierRow | null>(null);
@@ -1521,9 +1553,6 @@ export default function App() {
   const [drawerAmountTo, setDrawerAmountTo] = useState("");
   const [draggedItemId, setDraggedItemId] = useState<number | null>(null);
   const [dropTargetKey, setDropTargetKey] = useState<string | null>(null);
-  const [drawerWidth, setDrawerWidth] = useState(420);
-  const [isResizingDrawer, setIsResizingDrawer] = useState(false);
-  const drawerResizeRef = useRef<HTMLDivElement>(null);
   const [pendingPage, setPendingPage] = useState(1);
   const PENDING_PAGE_SIZE = 20;
   const [amountTolerancePercent, setAmountTolerancePercent] = useState(0.5);
@@ -1534,15 +1563,12 @@ export default function App() {
   const [maxAmount, setMaxAmount] = useState("");
   const [toast, setToast] = useState<string | null>(null);
 
-  // ─── الفيزا: عناصر منقولة لخانة الفيزا ───────────────────────────────────────
   const [visaItems, setVisaItems] = useState<VisaItem[]>([]);
 
-  // ─── معلقات ───────────────────────────────────────────────────────────────
   const [heldItems, setHeldItems] = useState<HeldItem[]>([]);
   const [returnedHeldBank, setReturnedHeldBank] = useState<BankRow[]>([]);
   const [returnedHeldCashier, setReturnedHeldCashier] = useState<CashierRow[]>([]);
 
-  // ─── استرجاع الجلسة السابقة تلقائياً ──────────────────────────────────────
   useEffect(() => {
     (async () => {
       const session = await storageGet<any>("current_session", null);
@@ -1572,7 +1598,6 @@ export default function App() {
     })();
   }, []);
 
-  // ─── حفظ تلقائي مستمر ──────────────────────────────────────────────────────
   useEffect(() => {
     if (!sessionLoaded) return;
     const t = setTimeout(() => {
@@ -1591,7 +1616,6 @@ export default function App() {
     manualGroups, savedMatches, rejectedPairs,
     visaItems, heldItems, returnedHeldBank, returnedHeldCashier
   ]);
-
 
   const loadBank=async(f:File)=>{
     setBankFile(f);setError(null);setResults(null);
@@ -1622,27 +1646,16 @@ export default function App() {
       let rawAmount = 0;
       let type: "مدفوع" | "مستلم" = "مستلم";
 
-      if (debit > 0 && credit === 0) {
-        rawAmount = debit;
-        type = "مدفوع";
-      } else if (credit > 0 && debit === 0) {
-        rawAmount = credit;
-        type = "مستلم";
-      } else if (debit > 0 && credit > 0) {
-        rawAmount = debit;
-        type = "مدفوع";
-      }
+      if (debit > 0 && credit === 0) { rawAmount = debit; type = "مدفوع"; }
+      else if (credit > 0 && debit === 0) { rawAmount = credit; type = "مستلم"; }
+      else if (debit > 0 && credit > 0) { rawAmount = debit; type = "مدفوع"; }
 
       if (rawAmount === 0) return null;
 
       return {
-        id:i,
-        date:fmtDate(bankMap.date?r[bankMap.date]:""),
+        id:i, date:fmtDate(bankMap.date?r[bankMap.date]:""),
         description:String(bankMap.desc?r[bankMap.desc]:"").trim(),
-        debit,
-        credit,
-        rawAmount,
-        type,
+        debit, credit, rawAmount, type,
         accountType: String((bankMap as any).accountType ? r[(bankMap as any).accountType] : "").trim(),
         orig:r
       };
@@ -1662,33 +1675,17 @@ export default function App() {
       let amount = 0;
       let type: "مدفوع" | "مستلم" = "مستلم";
 
-      if (debit > 0 && credit === 0) {
-        amount = debit;
-        type = "مدفوع";
-      } else if (credit > 0 && debit === 0) {
-        amount = credit;
-        type = "مستلم";
-      } else if (debit > 0 && credit > 0) {
-        amount = debit;
-        type = "مدفوع";
-      }
+      if (debit > 0 && credit === 0) { amount = debit; type = "مدفوع"; }
+      else if (credit > 0 && debit === 0) { amount = credit; type = "مستلم"; }
+      else if (debit > 0 && credit > 0) { amount = debit; type = "مدفوع"; }
 
       if (amount === 0 && !ma) return null;
 
       return {
-        id:i,
-        rawName,
-        name,
-        notes,
-        splitExpr,
-        debit,
-        credit,
-        amount,
-        matchAmount: ma ?? amount,
-        type,
+        id:i, rawName, name, notes, splitExpr, debit, credit, amount,
+        matchAmount: ma ?? amount, type,
         accountType: String((cashMap as any).accountType ? r[(cashMap as any).accountType] : "").trim(),
-        date:fmtDate(cashMap.date?r[cashMap.date]:""),
-        orig:r
+        date:fmtDate(cashMap.date?r[cashMap.date]:""), orig:r
       };
     }).filter((r): r is CashierRow => r !== null);
 
@@ -1729,7 +1726,6 @@ export default function App() {
     return s;
   }, [savedMatches]);
 
-  // أرقام الفيزا المحجوزة — نمنع تكرار نفس الرقم لفاتورة مختلفة
   const visaCashierIds = useMemo(() => new Set(visaItems.map(v => v.cashierId)), [visaItems]);
 
   const savedRows = useMemo(
@@ -1770,7 +1766,6 @@ export default function App() {
     return map;
   }, [uCashierRows, unmatchedBankForSuggestions, rejectedPairs, savedKeys, claimedNames]);
 
-
   const rerun = useCallback(() => {
     if (!activeBank.length || !activeCashier.length) return;
     const res = reconcile(activeBank, activeCashier, manualGroups, savedMatches, rejectedPairs, visaCashierIds, amountTolerancePercent);
@@ -1788,35 +1783,23 @@ export default function App() {
     finally{setLoading(false);}
   };
 
-  // ─── نقل عنصر للفيزا ──────────────────────────────────────────────────────
-  // أي فاتورة كاشير (من أي مكان: منتظرة، غير متطابقة، مؤكدة) ممكن تنقل للفيزا
-  // شرط: الاسم يحتوي على رقم من 4 أرقام (مع / أو -) أو يُنقل يدوياً
   const handleMoveToVisa = (cashierRow: CashierRow, source?: "pending" | "unmatched" | "saved" | "manual") => {
     const visaNum = extractVisaNumber(cashierRow.rawName);
     if (!visaNum) {
-      alert(`هذه الفاتورة لا تحتوي على رقم فيزا (4 أرقام بعد / أو -).\nالاسم: ${cashierRow.rawName}\nلا يمكن نقلها للفيزا تلقائياً. تأكد إن الاسم فيه نمط مثل: احمد دحلان/9118 أو احمد دحلان-9118`);
+      alert(`هذه الفاتورة لا تحتوي على رقم فيزا (4 أرقام بعد / أو -).\nالاسم: ${cashierRow.rawName}\nلا يمكن نقلها للفيزا تلقائياً.`);
       return;
     }
     const cleanName = extractVisaName(cashierRow.rawName);
     const item: VisaItem = {
-      id: `visa-${Date.now()}-${cashierRow.id}`,
-      cashierId: cashierRow.id,
-      rawName: cashierRow.rawName,
-      name: cleanName,
-      visaNumber: visaNum,
-      amount: cashierRow.amount,
-      type: cashierRow.type,
-      date: cashierRow.date,
-      movedAt: new Date().toLocaleString("ar-SA"),
-      source
+      id: `visa-${Date.now()}-${cashierRow.id}`, cashierId: cashierRow.id,
+      rawName: cashierRow.rawName, name: cleanName, visaNumber: visaNum,
+      amount: cashierRow.amount, type: cashierRow.type, date: cashierRow.date,
+      movedAt: new Date().toLocaleString("ar-SA"), source
     };
     setVisaItems(prev => [...prev, item]);
-
-    // إذا كانت مؤكدة (saved)، نحذفها من savedMatches
     if (source === "saved") {
       setSavedMatches(prev => prev.filter(s => s.cashierId !== cashierRow.id));
     }
-
     setExpandedMatchKey(null);
     setExpandedUnmatchedCashier(null);
   };
@@ -1842,23 +1825,15 @@ export default function App() {
 
     const newSaved: SavedMatch = {
       id: `saved-${Date.now()}-${cashierRow.id}-${bankRow.id}`,
-      cashierId: cashierRow.id,
-      bankId: bankRow.id,
-      cashierName: cashierRow.name,
-      bankDesc: bankRow.description,
-      amount: bankRow.rawAmount,
-      type: cashierRow.type,
+      cashierId: cashierRow.id, bankId: bankRow.id,
+      cashierName: cashierRow.name, bankDesc: bankRow.description,
+      amount: bankRow.rawAmount, type: cashierRow.type,
       date: new Date().toLocaleDateString("ar-SA"),
       savedAt: new Date().toLocaleString("ar-SA"),
-      note: autoNote,
-      isAmountDiff,
-      isNameDiff,
-      isManual: false,
-      isAccountTypeDiff,
+      note: autoNote, isAmountDiff, isNameDiff, isManual: false, isAccountTypeDiff,
       matchScore: Math.round(nameSim(cashierRow.name, bankRow.description) * 100),
       editorNotes: note,
-      bankAccountType: bankRow.accountType,
-      cashierAccountType: cashierRow.accountType
+      bankAccountType: bankRow.accountType, cashierAccountType: cashierRow.accountType
     };
 
     setSavedMatches(prev => [...prev, newSaved]);
@@ -1889,28 +1864,20 @@ export default function App() {
 
       newSaved.push({
         id: `saved-${Date.now()}-${cashierRow.id}-${bankRow.id}`,
-        cashierId: cashierRow.id,
-        bankId: bankRow.id,
-        cashierName: cashierRow.name,
-        bankDesc: bankRow.description,
-        amount: bankRow.rawAmount,
-        type: cashierRow.type,
+        cashierId: cashierRow.id, bankId: bankRow.id,
+        cashierName: cashierRow.name, bankDesc: bankRow.description,
+        amount: bankRow.rawAmount, type: cashierRow.type,
         date: new Date().toLocaleDateString("ar-SA"),
         savedAt: new Date().toLocaleString("ar-SA"),
-        note: autoNote,
-        isAmountDiff,
-        isNameDiff,
-        isManual: false,
-        isAccountTypeDiff,
+        note: autoNote, isAmountDiff, isNameDiff, isManual: false, isAccountTypeDiff,
         matchScore: Math.round(nameSim(cashierRow.name, bankRow.description) * 100),
         editorNotes: undefined,
-        bankAccountType: bankRow.accountType,
-        cashierAccountType: cashierRow.accountType
+        bankAccountType: bankRow.accountType, cashierAccountType: cashierRow.accountType
       });
     });
     if (!newSaved.length) return;
     setSavedMatches(prev => [...prev, ...newSaved]);
-      setToast(`تم تأكيد ${newSaved.length} مطابقة`);
+    setToast(`تم تأكيد ${newSaved.length} مطابقة`);
     setSelectedPendingKeys(new Set());
   };
 
@@ -1940,67 +1907,13 @@ export default function App() {
     const next = new Set(rejectedPairs);
     next.add(oldPairKey);
     next.delete(newPairKey);
-
-    const displacedCashier = pendingRows.find((r:any) => r.bank.id === newBank.id && r.cashier.id !== cashierRow.id);
-    const displacedSaved = savedMatches.find(s => s.bankId === newBank.id && s.cashierId !== cashierRow.id);
-
     setRejected(next);
     handleSaveMatch(cashierRow, newBank);
-
-    if (displacedCashier) {
-      handleSaveMatch(displacedCashier.cashier as CashierRow, oldBank);
-    } else if (displacedSaved) {
-      const newSaved: SavedMatch = {
-        ...displacedSaved,
-        bankId: oldBank.id,
-        bankDesc: oldBank.description,
-        amount: oldBank.rawAmount,
-        isAmountDiff: Math.abs(oldBank.rawAmount - (displacedSaved as any).amount) > 0.01,
-      };
-      setSavedMatches(prev => prev.filter(s => s.id !== displacedSaved.id).concat(newSaved));
-    }
-
-    setDrawerOpen(false);
-    setDrawerCashier(null);
-    setDrawerOldBank(null);
-    setDraggedItemId(null);
-    setDropTargetKey(null);
-  };
-
-  const handleReplaceCashier = (bankRow: BankRow, oldCashier: CashierRow, newCashier: CashierRow) => {
-    const oldPairKey = `${oldCashier.id}-${bankRow.id}`;
-    const newPairKey = `${newCashier.id}-${bankRow.id}`;
-    const next = new Set(rejectedPairs);
-    next.add(oldPairKey);
-    next.delete(newPairKey);
-
-    const displacedBank = pendingRows.find((r:any) => r.cashier.id === newCashier.id && r.bank.id !== bankRow.id);
-    const displacedSaved = savedMatches.find(s => s.cashierId === newCashier.id && s.bankId !== bankRow.id);
-
-    setRejected(next);
-    handleSaveMatch(newCashier, bankRow);
-
-    if (displacedBank) {
-      handleSaveMatch(oldCashier, displacedBank.bank as BankRow);
-    } else if (displacedSaved) {
-      const newSaved: SavedMatch = {
-        ...displacedSaved,
-        cashierId: oldCashier.id,
-        cashierName: oldCashier.name,
-        isAmountDiff: Math.abs((displacedSaved as any).amount - oldCashier.amount) > 0.01,
-      };
-      setSavedMatches(prev => prev.filter(s => s.id !== displacedSaved.id).concat(newSaved));
-    }
-
-    setDrawerOpen(false);
-    setDrawerCashier(null);
-    setDrawerOldBank(null);
-    setDraggedItemId(null);
-    setDropTargetKey(null);
+    closeDrawer();
   };
 
   const drawerBanks = useMemo(() => {
-    if (!drawerCashier) return [];
+    if (drawerMode !== "bank" || !drawerCashier) return [];
     return activeBank
       .filter(b => {
         if (b.type !== drawerCashier.type) return false;
@@ -2021,10 +1934,10 @@ export default function App() {
         return nameSim(drawerCashier.name, b.description) - nameSim(drawerCashier.name, a.description);
       })
       .slice(0, 50);
-  }, [drawerCashier, drawerNameSearch, drawerAmountFrom, drawerAmountTo, activeBank, savedBankIds, savedKeys, drawerOldBank, rejectedPairs]);
+  }, [drawerMode, drawerCashier, drawerNameSearch, drawerAmountFrom, drawerAmountTo, activeBank, savedBankIds, savedKeys, drawerOldBank, rejectedPairs]);
 
   const drawerCashiers = useMemo(() => {
-    if (!drawerOldBank) return [];
+    if (drawerMode !== "cashier" || !drawerOldBank) return [];
     return activeCashier
       .filter(c => {
         if (c.type !== drawerOldBank.type) return false;
@@ -2046,7 +1959,7 @@ export default function App() {
         return nameSim(drawerOldBank.description, b.name) - nameSim(drawerOldBank.description, a.name);
       })
       .slice(0, 50);
-  }, [drawerOldBank, drawerCashier, drawerNameSearch, drawerAmountFrom, drawerAmountTo, activeCashier, savedCashierIds, savedKeys, visaCashierIds]);
+  }, [drawerMode, drawerOldBank, drawerCashier, drawerNameSearch, drawerAmountFrom, drawerAmountTo, activeCashier, savedCashierIds, savedKeys, visaCashierIds]);
 
   const openDrawer = (cashier: CashierRow, oldBank: BankRow, mode: "bank" | "cashier" = "bank") => {
     setDrawerMode(mode);
@@ -2074,35 +1987,30 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") closeDrawer(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drawerOpen]);
-
-  useEffect(() => {
-    if (!isResizingDrawer) return;
-    const handleMouseMove = (e: MouseEvent) => {
-      const newWidth = Math.max(280, Math.min(680, window.innerWidth - e.clientX));
-      setDrawerWidth(newWidth);
-    };
-    const handleMouseUp = () => setIsResizingDrawer(false);
-    document.addEventListener("mousemove", handleMouseMove);
-    document.addEventListener("mouseup", handleMouseUp);
-    return () => {
-      document.removeEventListener("mousemove", handleMouseMove);
-      document.removeEventListener("mouseup", handleMouseUp);
-    };
-  }, [isResizingDrawer]);
 
   const handleDropBank = (cashier: CashierRow, oldBank: BankRow, newBankId: number) => {
     const newBank = activeBank.find(b => b.id === newBankId);
     if (!newBank) return;
     handleReplaceBank(cashier, oldBank, newBank);
-    setDropTargetKey(null);
+  };
+
+  const handleReplaceCashier = (bankRow: BankRow, oldCashier: CashierRow, newCashier: CashierRow) => {
+    const oldPairKey = `${oldCashier.id}-${bankRow.id}`;
+    const newPairKey = `${newCashier.id}-${bankRow.id}`;
+    const next = new Set(rejectedPairs);
+    next.add(oldPairKey);
+    next.delete(newPairKey);
+    setRejected(next);
+    handleSaveMatch(newCashier, bankRow);
+    closeDrawer();
   };
 
   const handleDropCashier = (bankRow: BankRow, oldCashier: CashierRow, newCashierId: number) => {
     const newCashier = activeCashier.find(c => c.id === newCashierId);
     if (!newCashier) return;
     handleReplaceCashier(bankRow, oldCashier, newCashier);
-    setDropTargetKey(null);
   };
 
   const handleAcceptSuggestion = (cashierRow: CashierRow, bankRow: BankRow) => {
@@ -2126,21 +2034,16 @@ export default function App() {
         if (savedKeys.has(pairKey)) return;
         newSaved.push({
           id: `manual-${g.id}-${c.id}-${b.id}`,
-          cashierId: c.id,
-          bankId: b.id,
-          cashierName: c.name,
-          bankDesc: b.description,
-          amount: b.rawAmount,
-          type: c.type,
+          cashierId: c.id, bankId: b.id,
+          cashierName: c.name, bankDesc: b.description,
+          amount: b.rawAmount, type: c.type,
           date: new Date().toLocaleDateString("ar-SA"),
           savedAt: new Date().toLocaleString("ar-SA"),
           note: g.note || "مطابقة يدوية",
           isAmountDiff: Math.abs(b.rawAmount - c.amount) > 0.01,
-          isNameDiff: true,
-          isManual: true,
+          isNameDiff: true, isManual: true,
           isAccountTypeDiff: accountTypesDiffer(b.accountType, c.accountType),
-          bankAccountType: b.accountType,
-          cashierAccountType: c.accountType,
+          bankAccountType: b.accountType, cashierAccountType: c.accountType,
           sourceGroupId: g.id,
           matchScore: Math.round(nameSim(c.name, b.description) * 100)
         });
@@ -2155,30 +2058,27 @@ export default function App() {
     setManualGroups(prev => prev.filter(g => g.id !== id));
   };
 
-  // ─── تعليق عنصر ──────────────────────────────────────────────────────────
   const handleHoldCashier = (c: CashierRow, note?: string) => {
+    if ((c as any)._fromHeld) {
+      setReturnedHeldCashier(prev => prev.filter(x => x.id !== c.id));
+    }
     const item: HeldItem = {
-      id: `held-c-${Date.now()}-${c.id}`,
-      kind: "cashier",
-      refId: c.id,
-      fileSessionId: cashFileSessionId,
-      data: c,
-      heldAt: new Date().toLocaleString("ar-SA"),
-      note
+      id: `held-c-${Date.now()}-${c.id}`, kind: "cashier", refId: c.id,
+      fileSessionId: cashFileSessionId, data: c,
+      heldAt: new Date().toLocaleString("ar-SA"), note
     };
     setHeldItems(prev => [...prev, item]);
     setExpandedMatchKey(null);
     setExpandedUnmatchedCashier(null);
   };
   const handleHoldBank = (b: BankRow, note?: string) => {
+    if ((b as any)._fromHeld) {
+      setReturnedHeldBank(prev => prev.filter(x => x.id !== b.id));
+    }
     const item: HeldItem = {
-      id: `held-b-${Date.now()}-${b.id}`,
-      kind: "bank",
-      refId: b.id,
-      fileSessionId: bankFileSessionId,
-      data: b,
-      heldAt: new Date().toLocaleString("ar-SA"),
-      note
+      id: `held-b-${Date.now()}-${b.id}`, kind: "bank", refId: b.id,
+      fileSessionId: bankFileSessionId, data: b,
+      heldAt: new Date().toLocaleString("ar-SA"), note
     };
     setHeldItems(prev => [...prev, item]);
     setExpandedMatchKey(null);
@@ -2199,7 +2099,6 @@ export default function App() {
     setHeldItems(prev => prev.filter(h => h.id !== id));
   };
 
-  // إعادة تشغيل المطابقة تلقائياً
   useEffect(() => {
     if (activeBank.length && activeCashier.length) {
       rerun();
@@ -2250,21 +2149,16 @@ export default function App() {
 
   useEffect(() => { setPendingPage(1); }, [resultSearch, resultType, minAmount, maxAmount]);
 
-  // ─── حفظ/تحميل المشروع كاملاً ─────────────────────────────────────────────
   const saveProject = async (name: string) => {
     const projects = await loadProjectsList();
     const project: SavedProject = {
-      id: `proj-${Date.now()}`,
-      name,
+      id: `proj-${Date.now()}`, name,
       savedAt: new Date().toLocaleString("ar-SA"),
       bankHeaders, bankRowsRaw, bankMap, bankSwap, bankFileSessionId,
       cashHeaders, cashRowsRaw, cashMap, cashSwap, cashFileSessionId,
       manualGroups, savedMatches,
       rejectedPairs: Array.from(rejectedPairs),
-      visaItems,
-      heldItems,
-      returnedHeldBank,
-      returnedHeldCashier
+      visaItems, heldItems, returnedHeldBank, returnedHeldCashier
     };
     await persistProjectsList([...projects, project]);
     alert(`تم حفظ المشروع "${name}" ✓\nتقدر ترجع له لاحقاً من "المشاريع المحفوظة"`);
@@ -2290,7 +2184,6 @@ export default function App() {
     await persistProjectsList(projects);
   };
 
-  // ─── حذف المحفوظات ──────────────────────────────────────────────────────────
   const handleClearSavedMatches = () => {
     if (!savedMatches.length) return;
     if (!window.confirm(`مسح جميع المطابقات المؤكدة (${savedMatches.length})؟`)) return;
@@ -2318,7 +2211,6 @@ export default function App() {
     setShowDeleteMenu(false);
   };
 
-  // ─── استكمال العمل من ملف إكسل مُصدَّر سابقاً ────────────────────────────────
   const buildResumeData = (): ResumeData => ({
     bankHeaders, bankRowsRaw, bankMap, bankSwap, bankFileSessionId,
     cashHeaders, cashRowsRaw, cashMap, cashSwap, cashFileSessionId,
@@ -2409,33 +2301,37 @@ export default function App() {
   };
 
   const handleRetryMatch = () => {
-    const remainingCashiers = uCashierRows.map((r:any) => r.cashier as CashierRow);
-    const remainingBanks = uBankRows.map((r:any) => r.bank as BankRow);
-    if (!remainingCashiers.length || !remainingBanks.length) {
-      alert("ما في فواتير أو حوالات متبقية لإعادة المطابقة عليها.");
+    if (!pendingRows.length) {
+      alert("ما في مطابقات منتظرة لإعادة فرزها.");
       return;
     }
-    const { simplePairs, bundles } = retryMatchRemaining(remainingCashiers, remainingBanks, 2);
-    const bundledCount = bundles.reduce((s, g) => s + g.cashiers.length + g.banks.length, 0);
-    if (!simplePairs.length && !bundles.length) {
-      alert("ما لقينا مطابقات جديدة إضافية بهذه الجولة. الباقي فعلاً محتاج مراجعة يدوية.");
-      return;
-    }
-    const msg = [
-      simplePairs.length ? `${simplePairs.length} مطابقة اسم (بفرق مبلغ بسيط لو موجود)` : null,
-      bundles.length ? `${bundles.length} مجموعة تجميع (${bundledCount} عنصر)` : null,
-    ].filter(Boolean).join(" و ");
-    if (!window.confirm(`لقينا: ${msg}.\nنحفظهم كمطابقات مؤكدة الآن؟`)) return;
 
-    simplePairs.forEach(({ cashier, bank }) => handleSaveMatch(cashier, bank));
-    bundles.forEach((g, i) => {
-      handleAddGroup({
-        id: `retry-${Date.now()}-${i}`,
-        banks: g.banks,
-        cashiers: g.cashiers,
-        note: "مطابقة تلقائية بإعادة الفرز"
+    const pendingCashierIds = new Set(pendingRows.map((r:any) => r.cashier.id as number));
+    const pendingBankIds = new Set(pendingRows.map((r:any) => r.bank.id as number));
+
+    let clearedCount = 0;
+    setRejected(prev => {
+      const next = new Set<string>();
+      prev.forEach(key => {
+        const [cidStr, bidStr] = key.split("-");
+        const cid = parseInt(cidStr);
+        const bid = parseInt(bidStr);
+        if (pendingCashierIds.has(cid) || pendingBankIds.has(bid)) {
+          clearedCount++;
+        } else {
+          next.add(key);
+        }
       });
+      return next;
     });
+
+    if (!window.confirm(
+      `إعادة فرز دقيقة لـ ${pendingRows.length} مطابقة منتظرة.\n` +
+      `رح نفك كل الروابط الحالية ونعيد المطابقة من الصفر بسعر تنافسي لكل فاتورة وحوالة.\n` +
+      `النتيجة بتضل بقائمة "منتظر" — ما رح تنتقل للمؤكدة إلا إذا ضغطتي حفظ.`
+    )) return;
+
+    setToast(`تمت إعادة الفرز التنافسي لـ ${pendingRows.length} مطابقة منتظرة`);
   };
 
   const handleMoveToManual = (pairs: Array<{ cashier: CashierRow; bank: BankRow }>) => {
@@ -2466,7 +2362,6 @@ export default function App() {
 
         {toast && <div className="fixed bottom-5 left-5 z-50 flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-3 text-sm text-white shadow-xl"><Check className="h-4 w-4 text-green-300" />{toast}</div>}
 
-        {/* Header */}
         <div className="flex flex-wrap items-center gap-3 justify-between">
           <div><h1 className="text-xl font-bold">منصة التسوية الذكية</h1><p className="mt-1 text-xs text-muted-foreground">مراجعة مالية أسرع، بقرارات قابلة للتتبع</p></div>
           <div className="flex items-center gap-2 flex-wrap">
@@ -2519,7 +2414,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Session restored notice */}
         {sessionRestoredNotice && (
           <div className="flex items-center gap-3 bg-green-50 border border-green-200 rounded-xl px-4 py-3">
             <Shield className="w-5 h-5 text-green-600 shrink-0"/>
@@ -2532,14 +2426,11 @@ export default function App() {
           </div>
         )}
 
-        {/* Visa banner */}
         {visaItems.length > 0 && (
           <div className="flex items-start gap-3 bg-teal-50 border border-teal-200 rounded-xl px-4 py-3">
             <CreditCard className="w-5 h-5 text-teal-600 shrink-0 mt-0.5"/>
             <div className="flex-1">
-              <p className="text-sm font-semibold text-teal-800">
-                {visaItems.length} عنصر منقول للفيزا
-              </p>
+              <p className="text-sm font-semibold text-teal-800">{visaItems.length} عنصر منقول للفيزا</p>
               <p className="text-xs text-teal-600 mt-0.5">اضغط على تبويب "💳 الفيزا" بالأسفل لمراجعتها</p>
             </div>
           </div>
@@ -2556,7 +2447,6 @@ export default function App() {
           </div>
         </div>}
 
-        {/* File upload */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
           <div className="bg-card border p-4 rounded-xl space-y-4">
             <h2 className="font-semibold text-sm">🏦 كشف البنك</h2>
@@ -2598,7 +2488,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Actions */}
         <div className="flex gap-3 flex-wrap">
           <button onClick={run} disabled={!canRun || loading}
             className="px-6 py-2.5 bg-blue-600 text-white rounded-lg disabled:opacity-40 font-medium hover:bg-blue-700 transition-colors flex items-center gap-2">
@@ -2607,7 +2496,7 @@ export default function App() {
           {results && (
             <button onClick={() => {
                 try {
-                  doExport(results, savedMatches, visaItems, buildResumeData());
+                  doExport(results, savedMatches, visaItems, heldItems, buildResumeData());
                 } catch (e) {
                   console.error("فشل تصدير الملف:", e);
                   setError("صار خطأ أثناء تصدير الملف. جرّب تاني.");
@@ -2624,7 +2513,6 @@ export default function App() {
           </label>
         </div>
 
-        {/* Results */}
         {results && stats && (
           <div className="space-y-4">
             <div className="grid grid-cols-3 sm:grid-cols-7 gap-2">
@@ -2648,7 +2536,6 @@ export default function App() {
             <div className="border rounded-xl bg-card overflow-hidden">
               <FilterBar search={resultSearch} onSearch={setResultSearch} type={resultType} onType={setResultType} minAmount={minAmount} onMinAmount={setMinAmount} maxAmount={maxAmount} onMaxAmount={setMaxAmount} />
 
-              {/* Saved matches */}
               {tab === "saved" && (
                 <table className="w-full text-sm">
                   <thead><tr className="bg-muted text-xs">
@@ -2676,25 +2563,17 @@ export default function App() {
                             <td className="px-3 py-2.5 font-medium flex items-center gap-1.5">
                               <Shield className="w-3.5 h-3.5 text-green-600" />
                               {r.cashier.name}
-                              {isFromHeld && (
-                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-300">📦 من ملف سابق</span>
-                              )}
-                              {visaNum && (
-                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 border border-teal-300">💳 {visaNum}</span>
-                              )}
+                              {isFromHeld && <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-300">📦 من ملف سابق</span>}
+                              {visaNum && <span className="text-[9px] px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 border border-teal-300">💳 {visaNum}</span>}
                             </td>
                             <td className="px-3 py-2.5 text-muted-foreground text-xs">
                               {r.bank.description}
-                              {sm.bankAccountType && (
-                                <div className="text-[10px] text-muted-foreground">{sm.bankAccountType}</div>
-                              )}
+                              {sm.bankAccountType && <div className="text-[10px] text-muted-foreground">{sm.bankAccountType}</div>}
                             </td>
                             <td className={`px-3 py-2.5 text-xs font-semibold ${typeColor}`}>{sm.type}</td>
                             <td className="px-3 py-2.5 font-mono font-bold text-green-700">
                               {fmtNum(r.bank.rawAmount)}
-                              {sm.isAmountDiff && (
-                                <div className="text-[10px] text-orange-600 font-normal">كاشير: {fmtNum(r.cashier.amount)}</div>
-                              )}
+                              {sm.isAmountDiff && <div className="text-[10px] text-orange-600 font-normal">كاشير: {fmtNum(r.cashier.amount)}</div>}
                             </td>
                             <td className="px-3 py-2.5 text-xs">{matchTypeLabel}</td>
                             <td className="px-3 py-2.5"><ConfidenceBadge score={sm.matchScore} /></td>
@@ -2703,18 +2582,10 @@ export default function App() {
                                 <span className="text-green-600 bg-green-50 px-1.5 py-0.5 rounded text-xs border border-green-200 flex items-center gap-0.5 w-fit">
                                   <Check className="w-2.5 h-2.5"/>✓ محفوظ
                                 </span>
-                                {sm.isAmountDiff && (
-                                  <div className="text-[10px] text-amber-600">⚠️ اختلاف مبلغ</div>
-                                )}
-                                {sm.isNameDiff && (
-                                  <div className="text-[10px] text-amber-600">⚠️ اختلاف اسم</div>
-                                )}
-                                {sm.isAccountTypeDiff && (
-                                  <div className="text-[10px] text-orange-700 font-medium">🏦 {sm.bankAccountType || "؟"} ↔ {sm.cashierAccountType || "؟"}</div>
-                                )}
-                                {sm.note && (
-                                  <div className="text-[10px] text-gray-500">📝 {sm.note}</div>
-                                )}
+                                {sm.isAmountDiff && <div className="text-[10px] text-amber-600">⚠️ اختلاف مبلغ</div>}
+                                {sm.isNameDiff && <div className="text-[10px] text-amber-600">⚠️ اختلاف اسم</div>}
+                                {sm.isAccountTypeDiff && <div className="text-[10px] text-orange-700 font-medium">🏦 {sm.bankAccountType || "؟"} ↔ {sm.cashierAccountType || "؟"}</div>}
+                                {sm.note && <div className="text-[10px] text-gray-500">📝 {sm.note}</div>}
                               </div>
                             </td>
                             <td className="px-3 py-2.5 text-center">
@@ -2728,9 +2599,7 @@ export default function App() {
                             <tr className="bg-green-50 border-t border-green-200">
                               <td colSpan={7} className="px-4 py-3">
                                 <div className="flex items-center gap-3 flex-wrap">
-                                  <span className="text-xs text-green-700 font-medium">
-                                    {r.cashier.name} ↔ {r.bank.description.slice(0, 30)}...
-                                  </span>
+                                  <span className="text-xs text-green-700 font-medium">{r.cashier.name} ↔ {r.bank.description.slice(0, 30)}...</span>
                                   <button onClick={() => handleUnsaveMatch(sm)}
                                     className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 text-amber-600 border border-amber-200 rounded-lg text-xs hover:bg-amber-100 transition-colors">
                                     <Link2Off className="w-3.5 h-3.5"/>إلغاء الحفظ
@@ -2745,12 +2614,8 @@ export default function App() {
                                       <CreditCard className="w-3.5 h-3.5"/>نقل للفيزا
                                     </button>
                                   )}
-                                  <span className="text-xs text-muted-foreground">
-                                    {sm.type}: {fmtNum(r.bank.rawAmount)}
-                                  </span>
-                                  <button onClick={() => setExpandedMatchKey(null)} className="mr-auto p-1 text-muted-foreground hover:text-foreground">
-                                    <X className="w-3.5 h-3.5"/>
-                                  </button>
+                                  <span className="text-xs text-muted-foreground">{sm.type}: {fmtNum(r.bank.rawAmount)}</span>
+                                  <button onClick={() => setExpandedMatchKey(null)} className="mr-auto p-1 text-muted-foreground hover:text-foreground"><X className="w-3.5 h-3.5"/></button>
                                 </div>
                               </td>
                             </tr>
@@ -2763,14 +2628,12 @@ export default function App() {
                 </table>
               )}
 
-              {/* Pending matches */}
               {tab === "pending" && (
-                <div>
-                  {(stats.uCashier > 0 && stats.uBank > 0) && (
+                <div className="flex gap-4">
+                <div className="flex-1 min-w-0 overflow-hidden">
+                  {pendingRows.length > 0 && (
                     <div className="flex items-center gap-3 px-4 py-2.5 bg-indigo-50/60 border-b border-indigo-100 flex-wrap">
-                      <span className="text-xs text-indigo-800">
-                        فيه {stats.uCashier} فاتورة و{stats.uBank} حوالة لسا مش متطابقين — جرّب إعادة فرز أوسع عليهم
-                      </span>
+                      <span className="text-xs text-indigo-800">إعادة المطابقة بتفحص المنتظرة، تفك ربط الضعيفة وتعيد فرزها</span>
                       <button onClick={handleRetryMatch}
                         className="mr-auto flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-medium hover:bg-indigo-700 transition-colors">
                         🔄 إعادة المطابقة
@@ -2778,6 +2641,7 @@ export default function App() {
                     </div>
                   )}
                   {pendingRows.length > 0 && (
+                    <>
                     <div className="flex items-center gap-3 px-4 py-2.5 bg-blue-50/60 border-b border-blue-100 flex-wrap">
                       <label className="flex items-center gap-1.5 text-xs font-medium text-blue-800 cursor-pointer">
                         <input type="checkbox" checked={allPendingSelected} onChange={togglePendingSelectAll} className="rounded"/>
@@ -2799,6 +2663,10 @@ export default function App() {
                         </button>
                       </div>
                     </div>
+                    <div className="px-4 py-1.5 bg-indigo-50/50 border-b border-indigo-100 text-[11px] text-indigo-700">
+                      💡 اضغط "بحث وسحب" بجانب بيان البنك لاستبدال الحوالة، أو بجانب اسم الكاشير لاستبدال الفاتورة — وبعدين اسحب العنصر من اللوحة وأفلته فوق نفس الخانة بالجدول.
+                    </div>
+                    </>
                   )}
                   <table className="w-full text-sm">
                     <thead><tr className="bg-muted text-xs">
@@ -2822,44 +2690,51 @@ export default function App() {
                                               r.matchType === "fourthName" ? "👤 الرابع" :
                                               r.matchType === "exact" ? "🎯 تطابق تام" :
                                               r.matchType === "bundle" ? "📊 تجميع" :
-                                              r.matchType === "typo" ? "✏️ تقريبي" :
-                                              "❓ غير محدد";
+                                              r.matchType === "typo" ? "✏️ تقريبي" : "❓ غير محدد";
                         const isFromHeld = !!r.cashier._fromHeld || !!r.bank._fromHeld;
                         const visaNum = extractVisaNumber(r.cashier.rawName);
                         return (
                           <React.Fragment key={i}>
-                            <tr className={`border-t transition-colors ${isDropTarget ? "bg-green-100 ring-2 ring-green-400 ring-inset" : isSelected ? "bg-blue-50/70" : isExpanded ? "bg-blue-50" : isFromHeld ? "bg-purple-50/50 hover:bg-purple-50" : r.isApprox ? "bg-amber-50/30 hover:bg-amber-50/60" : "hover:bg-muted/20"}`}>
+                            <tr className={`border-t transition-colors ${isDropTarget ? (drawerMode === "bank" ? "bg-blue-50 ring-2 ring-blue-400 ring-inset" : "bg-emerald-50 ring-2 ring-emerald-400 ring-inset") : isSelected ? "bg-blue-50/70" : isExpanded ? "bg-blue-50" : isFromHeld ? "bg-purple-50/50 hover:bg-purple-50" : r.isApprox ? "bg-amber-50/30 hover:bg-amber-50/60" : "hover:bg-muted/20"}`}>
                               <td className="px-3 py-2.5">
                                 <div onClick={() => togglePendingSelect(key)}
                                   className={`w-4 h-4 rounded border-2 flex items-center justify-center cursor-pointer transition-colors ${isSelected?"bg-blue-600 border-blue-600":"border-border"}`}>
                                   {isSelected && <Check className="w-2.5 h-2.5 text-white"/>}
                                 </div>
                               </td>
-                              <td className="px-3 py-2.5 font-medium">
-                                {r.cashier.name}
-                                {r.cashier.accountType && (
-                                  <div className="text-[10px] text-muted-foreground font-normal">{r.cashier.accountType}</div>
-                                )}
-                                {isFromHeld && (
-                                  <span className="mr-1.5 text-[9px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-300">📦 من ملف سابق</span>
-                                )}
-                                {visaNum && (
-                                  <span className="mr-1.5 text-[9px] px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 border border-teal-300">💳 {visaNum}</span>
-                                )}
+                              <td
+                                className={`px-3 py-2.5 font-medium transition-colors ${isDropTarget && drawerMode === "cashier" ? "bg-emerald-100" : ""}`}
+                                onDragOver={(e) => { if (draggedItemId !== null && drawerMode === "cashier") { e.preventDefault(); setDropTargetKey(key); } }}
+                                onDragLeave={() => { if (dropTargetKey === key) setDropTargetKey(null); }}
+                                onDrop={(e) => { e.preventDefault(); if (draggedItemId !== null && drawerMode === "cashier") { handleDropCashier(r.bank, r.cashier, draggedItemId); } setDraggedItemId(null); }}
+                              >
+                                <div className="flex items-center gap-1.5">
+                                  <span className="flex-1">
+                                    {r.cashier.name}
+                                    {r.cashier.accountType && <div className="text-[10px] text-muted-foreground font-normal">{r.cashier.accountType}</div>}
+                                  </span>
+                                  {isFromHeld && <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-300 shrink-0">📦 من ملف سابق</span>}
+                                  {visaNum && <span className="text-[9px] px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 border border-teal-300 shrink-0">💳 {visaNum}</span>}
+                                  <button
+                                    onClick={() => openDrawer(r.cashier, r.bank, "cashier")}
+                                    title="افتح قائمة فواتير الكاشير للبحث والسحب"
+                                    className="px-1.5 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded text-[10px] font-medium hover:bg-emerald-100 transition-colors flex items-center gap-0.5 shrink-0"
+                                  >
+                                    <Search className="w-2.5 h-2.5"/>بحث وسحب
+                                  </button>
+                                </div>
                               </td>
                               <td
-                                className={`px-3 py-2.5 text-muted-foreground text-xs transition-colors ${isDropTarget ? "bg-green-100" : ""}`}
-                                onDragOver={(e) => { if (draggedBankId !== null) { e.preventDefault(); setDropTargetKey(key); } }}
+                                className={`px-3 py-2.5 text-muted-foreground text-xs transition-colors ${isDropTarget && drawerMode === "bank" ? "bg-blue-100" : ""}`}
+                                onDragOver={(e) => { if (draggedItemId !== null && drawerMode === "bank") { e.preventDefault(); setDropTargetKey(key); } }}
                                 onDragLeave={() => { if (dropTargetKey === key) setDropTargetKey(null); }}
-                                onDrop={(e) => { e.preventDefault(); if (draggedBankId !== null) { handleDropBank(r.cashier, r.bank, draggedBankId); } setDraggedBankId(null); }}
+                                onDrop={(e) => { e.preventDefault(); if (draggedItemId !== null && drawerMode === "bank") { handleDropBank(r.cashier, r.bank, draggedItemId); } setDraggedItemId(null); }}
                               >
                                 <div className="flex items-center gap-1.5">
                                   <span className="flex-1">{r.bank.description}</span>
-                                  {r.bank.accountType && (
-                                    <span className="text-[10px] text-muted-foreground">{r.bank.accountType}</span>
-                                  )}
+                                  {r.bank.accountType && <span className="text-[10px] text-muted-foreground">{r.bank.accountType}</span>}
                                   <button
-                                    onClick={() => openDrawer(r.cashier, r.bank)}
+                                    onClick={() => openDrawer(r.cashier, r.bank, "bank")}
                                     title="افتح قائمة الحوالات للبحث والسحب"
                                     className="px-1.5 py-0.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded text-[10px] font-medium hover:bg-indigo-100 transition-colors flex items-center gap-0.5 shrink-0"
                                   >
@@ -2868,9 +2743,7 @@ export default function App() {
                                 </div>
                               </td>
                               <td className={`px-3 py-2.5 text-xs font-semibold ${typeColor}`}>{r.cashier.type}</td>
-                              <td className="px-3 py-2.5 font-mono font-bold text-blue-700">
-                                {fmtNum(r.bank.rawAmount)}
-                              </td>
+                              <td className="px-3 py-2.5 font-mono font-bold text-blue-700">{fmtNum(r.bank.rawAmount)}</td>
                               <td className="px-3 py-2.5 text-xs">{matchTypeLabel}</td>
                               <td className="px-3 py-2.5">
                                 <div className="flex flex-col gap-1">
@@ -2929,9 +2802,7 @@ export default function App() {
                               <tr className="bg-blue-50 border-t border-blue-200">
                                 <td colSpan={8} className="px-4 py-3">
                                   <div className="flex items-center gap-3 flex-wrap">
-                                    <span className="text-xs text-blue-700 font-medium">
-                                      {r.cashier.name} ↔ {r.bank.description.slice(0, 30)}...
-                                    </span>
+                                    <span className="text-xs text-blue-700 font-medium">{r.cashier.name} ↔ {r.bank.description.slice(0, 30)}...</span>
                                     <button onClick={() => handleSaveMatch(r.cashier, r.bank)}
                                       className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs hover:bg-green-700 transition-colors">
                                       <Save className="w-3.5 h-3.5"/>حفظ المطابقة
@@ -2946,12 +2817,8 @@ export default function App() {
                                         <CreditCard className="w-3.5 h-3.5"/>نقل للفيزا
                                       </button>
                                     )}
-                                    <span className="text-xs text-muted-foreground">
-                                      {r.cashier.type}: {fmtNum(r.bank.rawAmount)}
-                                    </span>
-                                    <button onClick={() => setExpandedMatchKey(null)} className="mr-auto p-1 text-muted-foreground hover:text-foreground">
-                                      <X className="w-3.5 h-3.5"/>
-                                    </button>
+                                    <span className="text-xs text-muted-foreground">{r.cashier.type}: {fmtNum(r.bank.rawAmount)}</span>
+                                    <button onClick={() => setExpandedMatchKey(null)} className="mr-auto p-1 text-muted-foreground hover:text-foreground"><X className="w-3.5 h-3.5"/></button>
                                   </div>
                                 </td>
                               </tr>
@@ -2964,29 +2831,45 @@ export default function App() {
                   </table>
                   {visiblePendingRows.length > PENDING_PAGE_SIZE && (
                     <div className="flex items-center justify-center gap-3 px-4 py-3 border-t border-border bg-muted/30 text-xs">
-                      <button
-                        onClick={() => setPendingPage(p => Math.max(1, p - 1))}
-                        disabled={pendingPage <= 1}
-                        className="px-3 py-1.5 rounded-lg border border-border bg-card disabled:opacity-40 hover:bg-muted/50 transition-colors flex items-center gap-1"
-                      >
+                      <button onClick={() => setPendingPage(p => Math.max(1, p - 1))} disabled={pendingPage <= 1}
+                        className="px-3 py-1.5 rounded-lg border border-border bg-card disabled:opacity-40 hover:bg-muted/50 transition-colors flex items-center gap-1">
                         <ChevronRight className="w-3.5 h-3.5"/>السابق
                       </button>
                       <span className="text-muted-foreground">
                         صفحة {pendingPage} من {Math.max(1, Math.ceil(visiblePendingRows.length / PENDING_PAGE_SIZE))} · عرض {pagedPendingRows.length} من {visiblePendingRows.length}
                       </span>
-                      <button
-                        onClick={() => setPendingPage(p => Math.min(Math.max(1, Math.ceil(visiblePendingRows.length / PENDING_PAGE_SIZE)), p + 1))}
+                      <button onClick={() => setPendingPage(p => Math.min(Math.max(1, Math.ceil(visiblePendingRows.length / PENDING_PAGE_SIZE)), p + 1))}
                         disabled={pendingPage >= Math.ceil(visiblePendingRows.length / PENDING_PAGE_SIZE)}
-                        className="px-3 py-1.5 rounded-lg border border-border bg-card disabled:opacity-40 hover:bg-muted/50 transition-colors flex items-center gap-1"
-                      >
+                        className="px-3 py-1.5 rounded-lg border border-border bg-card disabled:opacity-40 hover:bg-muted/50 transition-colors flex items-center gap-1">
                         التالي<ChevronLeft className="w-3.5 h-3.5"/>
                       </button>
                     </div>
                   )}
                 </div>
+                {drawerOpen && drawerCashier && drawerOldBank && (
+                  <MatchDrawer
+                    mode={drawerMode}
+                    cashier={drawerCashier}
+                    oldBank={drawerOldBank}
+                    nameSearch={drawerNameSearch}
+                    amountFrom={drawerAmountFrom}
+                    amountTo={drawerAmountTo}
+                    banks={drawerBanks}
+                    cashiers={drawerCashiers}
+                    draggedItemId={draggedItemId}
+                    onNameSearch={setDrawerNameSearch}
+                    onAmountFrom={setDrawerAmountFrom}
+                    onAmountTo={setDrawerAmountTo}
+                    onDragStart={setDraggedItemId}
+                    onDragEnd={() => { setDraggedItemId(null); setDropTargetKey(null); }}
+                    onReplaceBank={(b) => handleReplaceBank(drawerCashier, drawerOldBank, b)}
+                    onReplaceCashier={(c) => handleReplaceCashier(drawerOldBank, drawerCashier, c)}
+                    onClose={closeDrawer}
+                  />
+                )}
+              </div>
               )}
 
-              {/* Manual tab */}
               {tab === "manual" && (
                 <div className="p-4 text-center text-muted-foreground text-xs">
                   <p>المطابقات اليدوية تذهب مباشرة إلى "المؤكدة"</p>
@@ -2994,7 +2877,6 @@ export default function App() {
                 </div>
               )}
 
-              {/* Visa tab */}
               {tab === "visa" && (
                 <div>
                   <div className="px-4 py-3 bg-teal-50/60 border-b border-teal-100">
@@ -3049,7 +2931,6 @@ export default function App() {
                 </div>
               )}
 
-              {/* Held items (معلقات) */}
               {tab === "held" && (
                 <table className="w-full text-sm">
                   <thead><tr className="bg-muted text-xs">
@@ -3114,52 +2995,32 @@ export default function App() {
                     {visibleUCashierRows.map((r: any, i: number) => {
                       const isExpanded = expandedUnmatchedCashier === r.cashier.id;
                       const typeColor = r.cashier.type === "مدفوع" ? "text-red-600" : "text-green-600";
-
                       const rejectedForThisCashier = new Set(
-                        Array.from(rejectedPairs)
-                          .filter(key => key.startsWith(`${r.cashier.id}-`))
-                          .map(key => parseInt(key.split('-')[1]))
+                        Array.from(rejectedPairs).filter(key => key.startsWith(`${r.cashier.id}-`)).map(key => parseInt(key.split('-')[1]))
                       );
-
                       const availableBanks = unmatchedBankForSuggestions.filter(
                         b => !rejectedForThisCashier.has(b.id) && !savedBankIds.has(b.id) && b.type === r.cashier.type
                       );
-
-                      const suggestions = isExpanded ? getSuggestions(
-                        r.cashier,
-                        availableBanks,
-                        rejectedPairs,
-                        savedKeys,
-                        claimedNames,
-                        suggestionOwnerMap
-                      ) : [];
+                      const suggestions = isExpanded ? getSuggestions(r.cashier, availableBanks, rejectedPairs, savedKeys, claimedNames, suggestionOwnerMap) : [];
                       const isFromHeld = !!r.cashier._fromHeld;
                       const visaNum = extractVisaNumber(r.cashier.rawName);
-
                       return (
                         <React.Fragment key={i}>
                           <tr className={`border-t transition-colors ${isExpanded ? "bg-blue-50" : isFromHeld ? "bg-purple-50/50 hover:bg-purple-50" : r.reason === "اختلاف في الاسم" ? "bg-amber-50/30 hover:bg-amber-50/60" : "hover:bg-muted/20"}`}>
                             <td className="px-3 py-2.5 font-medium">
                               {r.cashier.name}
-                              {isFromHeld && (
-                                <span className="mr-1.5 text-[9px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-300">📦 من ملف سابق</span>
-                              )}
-                              {visaNum && (
-                                <span className="mr-1.5 text-[9px] px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 border border-teal-300">💳 {visaNum}</span>
-                              )}
+                              {isFromHeld && <span className="mr-1.5 text-[9px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-300">📦 من ملف سابق</span>}
+                              {visaNum && <span className="mr-1.5 text-[9px] px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 border border-teal-300">💳 {visaNum}</span>}
                             </td>
                             <td className={`px-3 py-2.5 text-xs font-semibold ${typeColor}`}>{r.cashier.type}</td>
                             <td className="px-3 py-2.5 font-mono font-semibold text-red-700">{fmtNum(r.cashier.amount)}</td>
                             <td className="px-3 py-2.5">
-                              <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${r.reason === "اختلاف في الاسم" ? "bg-amber-100 text-amber-800" : "bg-red-100 text-red-800"}`}>
-                                {r.reason}
-                              </span>
+                              <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${r.reason === "اختلاف في الاسم" ? "bg-amber-100 text-amber-800" : "bg-red-100 text-red-800"}`}>{r.reason}</span>
                             </td>
                             <td className="px-3 py-2.5">
                               <button onClick={() => setExpandedUnmatchedCashier(isExpanded ? null : r.cashier.id)}
                                 className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${isExpanded ? "bg-blue-100 text-blue-700" : "bg-muted hover:bg-muted/80 text-muted-foreground"}`}>
-                                <Sparkles className="w-3.5 h-3.5"/>
-                                {isExpanded ? "إخفاء" : "اقتراح بديل"}
+                                <Sparkles className="w-3.5 h-3.5"/>{isExpanded ? "إخفاء" : "اقتراح بديل"}
                               </button>
                             </td>
                             <td className="px-3 py-2.5">
@@ -3184,9 +3045,7 @@ export default function App() {
                               <td colSpan={6} className="px-4 py-3">
                                 {suggestions.length === 0 ? (
                                   <p className="text-xs text-muted-foreground">
-                                    {availableBanks.length === 0 ?
-                                      "جميع الحوالات البنكية المتاحة تم رفضها أو حفظها لهذا الكاشير" :
-                                      "لم يتم إيجاد اقتراحات مشابهة من البنك (لا الاسم ولا المبلغ متطابقان)."}
+                                    {availableBanks.length === 0 ? "جميع الحوالات البنكية المتاحة تم رفضها أو حفظها لهذا الكاشير" : "لم يتم إيجاد اقتراحات مشابهة من البنك (لا الاسم ولا المبلغ متطابقان)."}
                                   </p>
                                 ) : (
                                   <div className="space-y-2">
@@ -3196,8 +3055,7 @@ export default function App() {
                                                             matchType === "fourthName" ? "👤 الرابع" :
                                                             matchType === "exact" ? "🎯 تطابق تام" :
                                                             matchType === "typo" ? "✏️ اسم تقريبي" :
-                                                            matchType === "amount_only" ? "💰 مبلغ فقط (ضعيف)" :
-                                                            "❓ غير محدد";
+                                                            matchType === "amount_only" ? "💰 مبلغ فقط (ضعيف)" : "❓ غير محدد";
                                       const weak = matchType === "amount_only";
                                       return (
                                         <div key={bank.id} className={`flex items-center gap-3 p-2.5 bg-white rounded-lg border ${weak ? "border-gray-200" : "border-blue-200"}`}>
@@ -3207,9 +3065,7 @@ export default function App() {
                                             <span className="text-muted-foreground mr-2">{fmtNum(bank.rawAmount)}</span>
                                             <span className={`mr-1 ${weak ? "text-gray-400" : "text-blue-500"}`}>({(score * 100).toFixed(0)}% تطابق)</span>
                                             <span className="text-gray-400 mr-1">| {matchTypeLabel}</span>
-                                            {amountDiff > 0.01 && (
-                                              <span className="text-orange-500 mr-1">| فرق: {fmtNum(amountDiff)}</span>
-                                            )}
+                                            {amountDiff > 0.01 && <span className="text-orange-500 mr-1">| فرق: {fmtNum(amountDiff)}</span>}
                                             <div className="text-[10px] text-gray-400 mt-0.5">{reason}</div>
                                           </div>
                                           <button onClick={() => handleAcceptSuggestion(r.cashier, bank)}
@@ -3244,7 +3100,6 @@ export default function App() {
                 </table>
               )}
 
-              {/* Unmatched Bank */}
               {tab === "uBank" && (
                 <table className="w-full text-sm">
                   <thead><tr className="bg-muted text-xs">
@@ -3262,16 +3117,12 @@ export default function App() {
                         <tr key={i} className={`border-t transition-colors ${isFromHeld ? "bg-purple-50/50 hover:bg-purple-50" : "hover:bg-muted/20"}`}>
                           <td className="px-3 py-2.5 text-muted-foreground">
                             {r.bank.description}
-                            {isFromHeld && (
-                              <span className="mr-1.5 text-[9px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-300">📦 من ملف سابق</span>
-                            )}
+                            {isFromHeld && <span className="mr-1.5 text-[9px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-300">📦 من ملف سابق</span>}
                           </td>
                           <td className={`px-3 py-2.5 text-xs font-semibold ${typeColor}`}>{r.bank.type}</td>
                           <td className="px-3 py-2.5 font-mono font-semibold text-orange-700">{fmtNum(r.bank.rawAmount)}</td>
                           <td className="px-3 py-2.5">
-                            <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${r.reason === "اختلاف في الاسم" ? "bg-amber-100 text-amber-800" : "bg-gray-100 text-gray-700"}`}>
-                              {r.reason}
-                            </span>
+                            <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${r.reason === "اختلاف في الاسم" ? "bg-amber-100 text-amber-800" : "bg-gray-100 text-gray-700"}`}>{r.reason}</span>
                           </td>
                           <td className="px-3 py-2.5">
                             <button onClick={() => handleHoldBank(r.bank)}
@@ -3287,113 +3138,6 @@ export default function App() {
                   </tbody>
                 </table>
               )}
-            </div>
-          </div>
-        )}
-
-        {/* ─── Side Drawer: بحث الحوالات وسحبها ─────────────────────────────────── */}
-        {drawerOpen && drawerCashier && (
-          <div className="fixed inset-0 z-40 flex" dir="rtl">
-            <div className="flex-1 bg-black/30" onClick={closeDrawer} />
-            <div className="w-[420px] max-w-[90vw] bg-card border-r border-border shadow-2xl flex flex-col h-full">
-              <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-border bg-muted/30">
-                <div className="min-w-0">
-                  <div className="text-xs text-muted-foreground">قائمة سحب الحوالات</div>
-                  <div className="text-sm font-bold truncate">{drawerCashier.name}</div>
-                  <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${drawerCashier.type === "مدفوع" ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700"}`}>{drawerCashier.type}</span>
-                    <span className="text-sm font-mono font-bold text-blue-700">{fmtNum(drawerCashier.matchAmount)}</span>
-                  </div>
-                  {drawerOldBank && (
-                    <div className="text-[10px] text-muted-foreground mt-1">
-                      الحوالة الحالية: <span className="text-muted-foreground">{drawerOldBank.description} ({fmtNum(drawerOldBank.rawAmount)})</span>
-                    </div>
-                  )}
-                </div>
-                <button onClick={closeDrawer} className="p-1.5 text-muted-foreground hover:bg-muted rounded-lg transition-colors shrink-0">
-                  <X className="w-4 h-4"/>
-                </button>
-              </div>
-
-              <div className="px-4 py-3 border-b border-border space-y-2 bg-card">
-                <div className="relative">
-                  <Search className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground"/>
-                  <input
-                    value={drawerNameSearch}
-                    onChange={e => setDrawerNameSearch(e.target.value)}
-                    placeholder="بحث بالاسم..."
-                    className="w-full pl-3 pr-9 py-2 text-sm border border-border rounded-lg bg-input-background focus:outline-none focus:ring-1 focus:ring-ring"
-                  />
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    value={drawerAmountFrom}
-                    onChange={e => setDrawerAmountFrom(e.target.value)}
-                    placeholder="من مبلغ"
-                    className="flex-1 rounded-lg border border-border bg-input-background px-2.5 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
-                  />
-                  <span className="text-muted-foreground text-xs">إلى</span>
-                  <input
-                    type="number"
-                    value={drawerAmountTo}
-                    onChange={e => setDrawerAmountTo(e.target.value)}
-                    placeholder="إلى مبلغ"
-                    className="flex-1 rounded-lg border border-border bg-input-background px-2.5 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
-                  />
-                </div>
-                <div className="text-[10px] text-muted-foreground">
-                  اسحب الحوالة من القائمة وأفلتها فوق خانة "بيان البنك" في الجدول لاستبدالها. أو اضغط "استبدال" مباشرة.
-                </div>
-              </div>
-
-              <div className="flex-1 overflow-y-auto">
-                {drawerBanks.length === 0 ? (
-                  <div className="p-8 text-center text-xs text-muted-foreground">
-                    لا توجد حوالات تطابق البحث. جرّب تعديل الاسم أو المبلغ.
-                  </div>
-                ) : (
-                  <div className="divide-y divide-border">
-                    {drawerBanks.map(b => {
-                      const diff = Math.abs(b.rawAmount - drawerCashier.matchAmount);
-                      const exact = diff <= 0.01;
-                      const sim = nameSim(drawerCashier.name, b.description);
-                      const isDragged = draggedBankId === b.id;
-                      return (
-                        <div
-                          key={b.id}
-                          draggable
-                          onDragStart={() => setDraggedBankId(b.id)}
-                          onDragEnd={() => { setDraggedBankId(null); setDropTargetKey(null); }}
-                          className={`px-4 py-3 cursor-grab hover:bg-blue-50/50 transition-colors ${isDragged ? "opacity-50" : ""}`}
-                        >
-                          <div className="flex items-center gap-2">
-                            <div className="flex-1 min-w-0">
-                              <div className="text-sm font-medium truncate">{b.description}</div>
-                              <div className="flex items-center gap-2 mt-1 flex-wrap">
-                                <span className="font-mono font-bold text-blue-700 text-sm">{fmtNum(b.rawAmount)}</span>
-                                {exact ? (
-                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-100 text-green-700 border border-green-300">نفس المبلغ</span>
-                                ) : (
-                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 border border-amber-300">فرق: {fmtNum(diff)}</span>
-                                )}
-                                <span className="text-[10px] text-muted-foreground">تشابه: {(sim*100).toFixed(0)}%</span>
-                                {b.accountType && <span className="text-[10px] text-muted-foreground">| {b.accountType}</span>}
-                              </div>
-                            </div>
-                            <button
-                              onClick={() => drawerOldBank && handleReplaceBank(drawerCashier, drawerOldBank, b)}
-                              className="px-2.5 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 transition-colors shrink-0 flex items-center gap-1"
-                            >
-                              <Check className="w-3 h-3"/>استبدال
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
             </div>
           </div>
         )}
