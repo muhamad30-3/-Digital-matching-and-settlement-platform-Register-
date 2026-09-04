@@ -1513,13 +1513,17 @@ export default function App() {
   const [expandedUnmatchedCashier, setExpandedUnmatchedCashier] = useState<number|null>(null);
   const [selectedPendingKeys, setSelectedPendingKeys] = useState<Set<string>>(new Set());
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [drawerMode, setDrawerMode] = useState<"bank" | "cashier">("bank");
   const [drawerCashier, setDrawerCashier] = useState<CashierRow | null>(null);
   const [drawerOldBank, setDrawerOldBank] = useState<BankRow | null>(null);
   const [drawerNameSearch, setDrawerNameSearch] = useState("");
   const [drawerAmountFrom, setDrawerAmountFrom] = useState("");
   const [drawerAmountTo, setDrawerAmountTo] = useState("");
-  const [draggedBankId, setDraggedBankId] = useState<number | null>(null);
+  const [draggedItemId, setDraggedItemId] = useState<number | null>(null);
   const [dropTargetKey, setDropTargetKey] = useState<string | null>(null);
+  const [drawerWidth, setDrawerWidth] = useState(420);
+  const [isResizingDrawer, setIsResizingDrawer] = useState(false);
+  const drawerResizeRef = useRef<HTMLDivElement>(null);
   const [pendingPage, setPendingPage] = useState(1);
   const PENDING_PAGE_SIZE = 20;
   const [amountTolerancePercent, setAmountTolerancePercent] = useState(0.5);
@@ -1936,11 +1940,63 @@ export default function App() {
     const next = new Set(rejectedPairs);
     next.add(oldPairKey);
     next.delete(newPairKey);
+
+    const displacedCashier = pendingRows.find((r:any) => r.bank.id === newBank.id && r.cashier.id !== cashierRow.id);
+    const displacedSaved = savedMatches.find(s => s.bankId === newBank.id && s.cashierId !== cashierRow.id);
+
     setRejected(next);
     handleSaveMatch(cashierRow, newBank);
+
+    if (displacedCashier) {
+      handleSaveMatch(displacedCashier.cashier as CashierRow, oldBank);
+    } else if (displacedSaved) {
+      const newSaved: SavedMatch = {
+        ...displacedSaved,
+        bankId: oldBank.id,
+        bankDesc: oldBank.description,
+        amount: oldBank.rawAmount,
+        isAmountDiff: Math.abs(oldBank.rawAmount - (displacedSaved as any).amount) > 0.01,
+      };
+      setSavedMatches(prev => prev.filter(s => s.id !== displacedSaved.id).concat(newSaved));
+    }
+
     setDrawerOpen(false);
     setDrawerCashier(null);
     setDrawerOldBank(null);
+    setDraggedItemId(null);
+    setDropTargetKey(null);
+  };
+
+  const handleReplaceCashier = (bankRow: BankRow, oldCashier: CashierRow, newCashier: CashierRow) => {
+    const oldPairKey = `${oldCashier.id}-${bankRow.id}`;
+    const newPairKey = `${newCashier.id}-${bankRow.id}`;
+    const next = new Set(rejectedPairs);
+    next.add(oldPairKey);
+    next.delete(newPairKey);
+
+    const displacedBank = pendingRows.find((r:any) => r.cashier.id === newCashier.id && r.bank.id !== bankRow.id);
+    const displacedSaved = savedMatches.find(s => s.cashierId === newCashier.id && s.bankId !== bankRow.id);
+
+    setRejected(next);
+    handleSaveMatch(newCashier, bankRow);
+
+    if (displacedBank) {
+      handleSaveMatch(oldCashier, displacedBank.bank as BankRow);
+    } else if (displacedSaved) {
+      const newSaved: SavedMatch = {
+        ...displacedSaved,
+        cashierId: oldCashier.id,
+        cashierName: oldCashier.name,
+        isAmountDiff: Math.abs((displacedSaved as any).amount - oldCashier.amount) > 0.01,
+      };
+      setSavedMatches(prev => prev.filter(s => s.id !== displacedSaved.id).concat(newSaved));
+    }
+
+    setDrawerOpen(false);
+    setDrawerCashier(null);
+    setDrawerOldBank(null);
+    setDraggedItemId(null);
+    setDropTargetKey(null);
   };
 
   const drawerBanks = useMemo(() => {
@@ -1967,7 +2023,33 @@ export default function App() {
       .slice(0, 50);
   }, [drawerCashier, drawerNameSearch, drawerAmountFrom, drawerAmountTo, activeBank, savedBankIds, savedKeys, drawerOldBank, rejectedPairs]);
 
-  const openDrawer = (cashier: CashierRow, oldBank: BankRow) => {
+  const drawerCashiers = useMemo(() => {
+    if (!drawerOldBank) return [];
+    return activeCashier
+      .filter(c => {
+        if (c.type !== drawerOldBank.type) return false;
+        if (visaCashierIds.has(c.id)) return false;
+        const pairKey = `${c.id}-${drawerOldBank.id}`;
+        if (savedCashierIds.has(c.id) && !savedKeys.has(pairKey)) return false;
+        if (c.id === drawerCashier?.id) return false;
+        const nameMatch = !drawerNameSearch.trim() ||
+          c.name.toLowerCase().includes(drawerNameSearch.trim().toLowerCase());
+        const amt = c.matchAmount;
+        const fromOk = !drawerAmountFrom || amt >= Number(drawerAmountFrom);
+        const toOk = !drawerAmountTo || amt <= Number(drawerAmountTo);
+        return nameMatch && fromOk && toOk;
+      })
+      .sort((a, b) => {
+        const diffA = Math.abs(a.matchAmount - drawerOldBank.rawAmount);
+        const diffB = Math.abs(b.matchAmount - drawerOldBank.rawAmount);
+        if (diffA !== diffB) return diffA - diffB;
+        return nameSim(drawerOldBank.description, b.name) - nameSim(drawerOldBank.description, a.name);
+      })
+      .slice(0, 50);
+  }, [drawerOldBank, drawerCashier, drawerNameSearch, drawerAmountFrom, drawerAmountTo, activeCashier, savedCashierIds, savedKeys, visaCashierIds]);
+
+  const openDrawer = (cashier: CashierRow, oldBank: BankRow, mode: "bank" | "cashier" = "bank") => {
+    setDrawerMode(mode);
     setDrawerCashier(cashier);
     setDrawerOldBank(oldBank);
     setDrawerNameSearch("");
@@ -1983,12 +2065,43 @@ export default function App() {
     setDrawerNameSearch("");
     setDrawerAmountFrom("");
     setDrawerAmountTo("");
+    setDraggedItemId(null);
+    setDropTargetKey(null);
   };
+
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") closeDrawer(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [drawerOpen]);
+
+  useEffect(() => {
+    if (!isResizingDrawer) return;
+    const handleMouseMove = (e: MouseEvent) => {
+      const newWidth = Math.max(280, Math.min(680, window.innerWidth - e.clientX));
+      setDrawerWidth(newWidth);
+    };
+    const handleMouseUp = () => setIsResizingDrawer(false);
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [isResizingDrawer]);
 
   const handleDropBank = (cashier: CashierRow, oldBank: BankRow, newBankId: number) => {
     const newBank = activeBank.find(b => b.id === newBankId);
     if (!newBank) return;
     handleReplaceBank(cashier, oldBank, newBank);
+    setDropTargetKey(null);
+  };
+
+  const handleDropCashier = (bankRow: BankRow, oldCashier: CashierRow, newCashierId: number) => {
+    const newCashier = activeCashier.find(c => c.id === newCashierId);
+    if (!newCashier) return;
+    handleReplaceCashier(bankRow, oldCashier, newCashier);
     setDropTargetKey(null);
   };
 
