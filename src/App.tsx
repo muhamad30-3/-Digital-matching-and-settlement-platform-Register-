@@ -1,11 +1,13 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars */
 import React, { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import * as XLSX from "xlsx";
-import Reconciliation2 from "./Reconciliation2";
+import Reconciliation2, { type StageAResult } from "./Reconciliation2";
 import {
   Upload, FileSpreadsheet, Download, ChevronDown, X,
-  Plus, Trash2, AlertTriangle, Check,
+  Trash2, AlertTriangle, Check,
   Search, Link2, Link2Off, ChevronLeft, ChevronRight, CreditCard,
-  Sparkles, Info, Save, Shield, FolderOpen, FolderPlus, RotateCcw, FolderMinus
+  Sparkles, Info, Save, Shield, FolderOpen, FolderPlus, RotateCcw, FolderMinus,
+  GripVertical, Landmark, Users
 } from "lucide-react";
 
 // ─── Excel helpers ────────────────────────────────────────────────────────────
@@ -39,9 +41,20 @@ function fmtNum(n: number) {
 }
 
 // ─── تخزين دائم ────────────────────────────────────────────────────────────────
+interface AppStorage {
+  get(key: string): Promise<{ value: string } | null>;
+  set(key: string, value: string): Promise<void>;
+  delete(key: string): Promise<void>;
+  list(prefix: string): Promise<{ keys: string[] }>;
+}
+
+interface StorageWindow extends Window {
+  storage?: AppStorage;
+}
+
 async function storageGet<T>(key: string, fallback: T): Promise<T> {
   try {
-    const w = window as any;
+    const w = window as StorageWindow;
     if (w?.storage?.get) {
       const res = await w.storage.get(key);
       return res ? (JSON.parse(res.value) as T) : fallback;
@@ -56,7 +69,7 @@ async function storageGet<T>(key: string, fallback: T): Promise<T> {
 }
 async function storageSet(key: string, value: unknown): Promise<void> {
   try {
-    const w = window as any;
+    const w = window as StorageWindow;
     if (w?.storage?.set) {
       await w.storage.set(key, JSON.stringify(value));
       return;
@@ -66,40 +79,18 @@ async function storageSet(key: string, value: unknown): Promise<void> {
 }
 async function storageDelete(key: string): Promise<void> {
   try {
-    const w = window as any;
+    const w = window as StorageWindow;
     if (w?.storage?.delete) { await w.storage.delete(key); return; }
   } catch { /* تجاهل */ }
   try { localStorage.removeItem(key); } catch { /* تجاهل */ }
 }
-async function storageListKeys(prefix: string): Promise<string[]> {
-  try {
-    const w = window as any;
-    if (w?.storage?.list) {
-      const res = await w.storage.list(prefix);
-      return res?.keys ?? [];
-    }
-  } catch { /* تجاهل */ }
-  try {
-    const keys: string[] = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k && k.startsWith(prefix)) keys.push(k);
-    }
-    return keys;
-  } catch { return []; }
-}
-
 // ─── Visa detection ────────────────────────────────────────────────────────────
-// يكتشف الفواتير اللي بتحتوي على نمط: اسم/رقم (4 أرقام) أو اسم-رقم (4 أرقام)
-// مثال: "احمد دحلان/9118" أو "احمد دحلان-9118"
-// الرقم بكون من 4 أرقام بالضبط
-const VISA_NUM_RE = /[\/\-]\s*(\d{4})(?!\d)/;
+const VISA_NUM_RE = new RegExp("[/-]\\s*(\\d{4})(?!\\d)");
 function extractVisaNumber(rawName: string): string | null {
   const m = rawName.match(VISA_NUM_RE);
   return m ? m[1] : null;
 }
 function extractVisaName(rawName: string): string {
-  // يشيل رقم الفيزا من الاسم عشان يظهر نظيف
   return rawName.replace(VISA_NUM_RE, "").replace(/\s+/g, " ").trim();
 }
 
@@ -131,7 +122,7 @@ const AR_EN: Record<string, string> = {
   "َ":"","ُ":"","ِ":"","ْ":"","ً":"","ٌ":"","ٍ":"",
 };
 function normName(s: string) {
-  let c = s.toLowerCase()
+  const c = s.toLowerCase()
     .replace(/mahmoud/g, "mhmd")
     .replace(/raefet/g, "raft")
     .replace(/اجمد/g,"احمد")
@@ -179,6 +170,7 @@ interface BankRow {
   debit: number; credit: number; rawAmount: number;
   type: "مدفوع" | "مستلم";
   accountType: string;
+  ref: string;
   orig: Record<string,unknown>;
   _fromHeld?: boolean;
 }
@@ -188,6 +180,7 @@ interface CashierRow {
   debit: number; credit: number; amount: number; matchAmount: number;
   type: "مدفوع" | "مستلم";
   accountType: string;
+  ref: string;
   date: string; orig: Record<string,unknown>;
   _fromHeld?: boolean;
 }
@@ -236,6 +229,22 @@ interface VisaItem {
   source?: "pending" | "unmatched" | "saved" | "manual";
 }
 
+interface HeldItem {
+  id: string;
+  kind: "bank" | "cashier";
+  refId: number;
+  fileSessionId: number;
+  data: BankRow | CashierRow;
+  heldAt: string;
+  note?: string;
+}
+
+let heldReturnSequence = 0;
+function nextHeldRowId(): number {
+  heldReturnSequence = (heldReturnSequence + 1) % 1000;
+  return -(Date.now() * 1000 + heldReturnSequence);
+}
+
 function normAccountType(s: string): string {
   return (s || "").toString().trim().toLowerCase().replace(/\s+/g, " ");
 }
@@ -246,7 +255,7 @@ function accountTypesDiffer(bankType: string, cashierType: string): boolean {
 }
 
 // ─── Advanced match check ───────────────────────────────────────────────────
-function advancedMatchCheck(cashierName: string, bankDesc: string): {
+function advancedMatchCheckSingle(cashierName: string, bankDesc: string): {
   isMatch: boolean;
   isApprox: boolean;
   matchType: "exact" | "firstSecond" | "fourthName" | "typo" | "none";
@@ -260,6 +269,19 @@ function advancedMatchCheck(cashierName: string, bankDesc: string): {
   const squished = (arr: string[]) => arr.slice().sort().join("");
   if (squished(cT) === squished(bT)) {
     return { isMatch: true, isApprox: false, matchType: "exact" };
+  }
+
+  if (cT.length >= 2 && bT.length >= 2) {
+    const firstMatch = wordTypoMatch(cT[0], bT[0]);
+    const lastMatch = wordTypoMatch(cT[cT.length - 1], bT[bT.length - 1]);
+    if (firstMatch && lastMatch) {
+      return {
+        isMatch: true,
+        isApprox: cT[0] !== bT[0] || cT[cT.length - 1] !== bT[bT.length - 1],
+        matchType: "firstSecond",
+        matchedTokens: [cT[0], cT[cT.length - 1]]
+      };
+    }
   }
 
   if (cT.length >= 2 && bT.length >= 2) {
@@ -317,6 +339,33 @@ function advancedMatchCheck(cashierName: string, bankDesc: string): {
   return { isMatch: false, isApprox: false, matchType: "none" };
 }
 
+function advancedMatchCheck(cashierName: string, bankDesc: string): {
+  isMatch: boolean;
+  isApprox: boolean;
+  matchType: "exact" | "firstSecond" | "fourthName" | "typo" | "none";
+  matchedTokens?: string[];
+} {
+  const bankSegments = bankDesc.split("/").map(segment => segment.trim()).filter(Boolean);
+  if (bankSegments.length <= 1) return advancedMatchCheckSingle(cashierName, bankDesc);
+  const results = bankSegments.map(segment => advancedMatchCheckSingle(cashierName, segment));
+  return results
+    .filter(result => result.isMatch)
+    .sort((a, b) => Number(a.isApprox) - Number(b.isApprox))[0] ||
+    { isMatch: false, isApprox: false, matchType: "none" };
+}
+
+function smartNameKey(value: string): string {
+  const tokens = nameTokens(value);
+  return tokens.length >= 2 ? `${tokens[0]} ${tokens[tokens.length - 1]}` : tokens.join(" ");
+}
+
+function smartAliasTarget(cashierName: string, bankDescription: string): string {
+  return bankDescription.split("/")
+    .map(segment => segment.trim())
+    .filter(Boolean)
+    .sort((a, b) => nameSim(cashierName, b) - nameSim(cashierName, a))[0] || bankDescription;
+}
+
 // ─── Reconcile ──────────────────────────────────────────────────────────────
 function reconcile(
   bank: BankRow[],
@@ -325,7 +374,10 @@ function reconcile(
   savedMatches: SavedMatch[],
   rejectedPairs: Set<string>,
   visaCashierIds: Set<number>,
+  jawwalPayCashierIds: Set<number>,
+  mahmoudWalletCashierIds: Set<number>,
   amountTolerancePercent: number = 0.5,
+  aliases: Record<string, string> = {},
 ): MatchResult[] {
   const results: MatchResult[] = [];
   const usedBank = new Set<number>();
@@ -335,80 +387,69 @@ function reconcile(
   const savedCashierIds = new Set(savedMatches.map(s => s.cashierId));
   const savedBankIds = new Set(savedMatches.map(s => s.bankId));
 
-  // 1. Saved matches
   savedMatches.forEach(sm => {
     const bankRow = bank.find(b => b.id === sm.bankId);
     const cashierRow = cashier.find(c => c.id === sm.cashierId);
     if (bankRow && cashierRow) {
-      results.push({
-        type: "saved",
-        bank: bankRow,
-        cashier: cashierRow,
-        savedMatch: sm
-      });
+      results.push({ type: "saved", bank: bankRow, cashier: cashierRow, savedMatch: sm });
       usedBank.add(bankRow.id);
       usedCashier.add(cashierRow.id);
     }
   });
   cashier.forEach(c => {
     if (usedCashier.has(c.id) || savedCashierIds.has(c.id)) return;
+    if (jawwalPayCashierIds.has(c.id)) {
+      results.push({ type: "jawwalPay", cashier: c });
+      usedCashier.add(c.id);
+      return;
+    }
+    if (mahmoudWalletCashierIds.has(c.id)) {
+      results.push({ type: "mahmoudWallet", cashier: c });
+      usedCashier.add(c.id);
+      return;
+    }
     if (visaCashierIds.has(c.id)) {
       results.push({ type:"visa", cashier:c });
       usedCashier.add(c.id);
     }
   });
 
-  // 3. Direct 1-to-1 match
+  const candidates: Array<{ cashier: CashierRow; bank: BankRow; score: number; isApprox: boolean; matchType: string }> = [];
   cashier.forEach(c => {
-    if (usedCashier.has(c.id) || savedCashierIds.has(c.id) || visaCashierIds.has(c.id)) return;
-    let bestMatch: { bank: BankRow; isApprox: boolean; matchType: string } | null = null;
-    let bestScore = -1;
-
-    for (let bi=0; bi<bank.length; bi++) {
-      if (usedBank.has(bank[bi].id) || savedBankIds.has(bank[bi].id)) continue;
-      if (c.type !== bank[bi].type) continue;
-
-      const pairKey=`${c.id}-${bank[bi].id}`;
-      if (rejectedPairs.has(pairKey) || savedKeys.has(pairKey)) continue;
-
+    if (usedCashier.has(c.id) || savedCashierIds.has(c.id) || visaCashierIds.has(c.id) || jawwalPayCashierIds.has(c.id) || mahmoudWalletCashierIds.has(c.id)) return;
+    bank.forEach(b => {
+      if (usedBank.has(b.id) || savedBankIds.has(b.id) || c.type !== b.type) return;
+      const pairKey = `${c.id}-${b.id}`;
+      if (rejectedPairs.has(pairKey) || savedKeys.has(pairKey)) return;
       const amountTolerance = Math.max(0.01, c.matchAmount * amountTolerancePercent / 100);
-      const amtMatch = Math.abs(bank[bi].rawAmount - c.matchAmount) <= amountTolerance;
-      if (!amtMatch) continue;
-
-      const ms = advancedMatchCheck(c.name, bank[bi].description);
-      if (!ms.isMatch) continue;
-
-      const priority =
-        ms.matchType === "exact" ? 4 :
-        ms.matchType === "firstSecond" ? 3 :
-        ms.matchType === "fourthName" ? 2 : 1;
-      const score = priority + nameSim(c.name, bank[bi].description);
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestMatch = { bank: bank[bi], isApprox: ms.isApprox, matchType: ms.matchType };
-      }
-    }
-
-    if (bestMatch) {
-      results.push({
-        type: "pending",
-        bank: bestMatch.bank,
-        cashier: c,
-        isApprox: bestMatch.isApprox,
-        isExactAmount: true,
-        matchType: bestMatch.matchType,
-        amountDiff: 0,
-        matchScore: Math.round(Math.min(1, nameSim(c.name, bestMatch.bank.description) + (bestMatch.isApprox ? 0.25 : 0.45)) * 100),
-        accountTypeDiff: accountTypesDiffer(bestMatch.bank.accountType, c.accountType)
-      } as any);
-      usedBank.add(bestMatch.bank.id);
-      usedCashier.add(c.id);
-    }
+      if (Math.abs(b.rawAmount - c.matchAmount) > amountTolerance) return;
+      const aliasMatch = aliases[smartNameKey(c.name)] && b.description.split("/").some(segment => smartNameKey(segment) === aliases[smartNameKey(c.name)]);
+      const ms = aliasMatch ? { isMatch: true, isApprox: false, matchType: "exact" as const } : advancedMatchCheck(c.name, b.description);
+      const similarity = nameSim(c.name, b.description);
+      if (!ms.isMatch && similarity < 0.25) return;
+      const priority = ms.isMatch ? (ms.matchType === "exact" ? 4 : ms.matchType === "firstSecond" ? 3 : ms.matchType === "fourthName" ? 2 : 1) : 0;
+      candidates.push({ cashier: c, bank: b, score: priority + similarity, isApprox: !ms.isMatch || ms.isApprox, matchType: ms.isMatch ? ms.matchType : "closest-name" });
+    });
+  });
+  candidates.sort((a, b) => b.score - a.score);
+  candidates.forEach(candidate => {
+    if (usedCashier.has(candidate.cashier.id) || usedBank.has(candidate.bank.id)) return;
+    results.push({
+      type: "pending",
+      bank: candidate.bank,
+      cashier: candidate.cashier,
+      isApprox: candidate.isApprox,
+      isExactAmount: true,
+      matchType: candidate.matchType,
+      amountDiff: Math.abs(candidate.bank.rawAmount - candidate.cashier.matchAmount),
+      matchScore: Math.round(Math.min(1, candidate.score / 4.5) * 100),
+      accountTypeDiff: accountTypesDiffer(candidate.bank.accountType, candidate.cashier.accountType)
+    });
+    usedBank.add(candidate.bank.id);
+    usedCashier.add(candidate.cashier.id);
   });
 
-  // 4. Bundle matching
-  const remC = cashier.filter(c => !usedCashier.has(c.id) && !savedCashierIds.has(c.id) && !visaCashierIds.has(c.id));
+  const remC = cashier.filter(c => !usedCashier.has(c.id) && !savedCashierIds.has(c.id) && !visaCashierIds.has(c.id) && !jawwalPayCashierIds.has(c.id) && !mahmoudWalletCashierIds.has(c.id));
   const remB = bank.filter(b => !usedBank.has(b.id) && !savedBankIds.has(b.id));
 
   const getBase = (name:string) => normName(name).split(" ").filter(t=>t.length>2&&t!=="al").slice(0,2).join(" ");
@@ -439,10 +480,10 @@ function reconcile(
     const totB = g.banks.reduce((s,b) => s + b.rawAmount, 0);
     if (Math.abs(totC - totB) > 0.05) return;
 
-    const maxL = Math.max(g.cashiers.length, g.banks.length);
-    for (let i = 0; i < maxL; i++) {
-      const c = g.cashiers[i % g.cashiers.length];
-      const b = g.banks[i % g.banks.length];
+    const pairCount = Math.min(g.cashiers.length, g.banks.length);
+    for (let i = 0; i < pairCount; i++) {
+      const c = g.cashiers[i];
+      const b = g.banks[i];
       const pairKey = `${c.id}-${b.id}`;
       if (!rejectedPairs.has(pairKey) && !savedKeys.has(pairKey)) {
         results.push({
@@ -454,16 +495,15 @@ function reconcile(
           isExactAmount: true,
           matchType: "bundle",
           amountDiff: 0
-        } as any);
+        });
         usedCashier.add(c.id);
         usedBank.add(b.id);
       }
     }
   });
 
-  // 5. Unmatched
   cashier.forEach(c => {
-    if (usedCashier.has(c.id) || savedCashierIds.has(c.id) || visaCashierIds.has(c.id)) return;
+    if (usedCashier.has(c.id) || savedCashierIds.has(c.id) || visaCashierIds.has(c.id) || jawwalPayCashierIds.has(c.id) || mahmoudWalletCashierIds.has(c.id)) return;
     const hasAmt = bank.some(b => !usedBank.has(b.id) && !savedBankIds.has(b.id) &&
       b.type === c.type && Math.abs(b.rawAmount - c.matchAmount) <= 0.01);
     results.push({
@@ -475,7 +515,7 @@ function reconcile(
 
   bank.forEach(b => {
     if (usedBank.has(b.id) || savedBankIds.has(b.id)) return;
-    const hasAmt = cashier.some(c => !usedCashier.has(c.id) && !savedCashierIds.has(c.id) && !visaCashierIds.has(c.id) &&
+    const hasAmt = cashier.some(c => !usedCashier.has(c.id) && !savedCashierIds.has(c.id) && !visaCashierIds.has(c.id) && !jawwalPayCashierIds.has(c.id) && !mahmoudWalletCashierIds.has(c.id) &&
       c.type === b.type && Math.abs(c.matchAmount - b.rawAmount) <= 0.01);
     results.push({
       type:"unmatchedBank",
@@ -490,86 +530,82 @@ function reconcile(
 // ─── MatchResult type ────────────────────────────────────────────────────────
 type MatchResult =
   | { type:"saved"; bank:BankRow; cashier:CashierRow; savedMatch:SavedMatch }
-  | { type:"pending"; bank:BankRow; cashier:CashierRow; isApprox:boolean; isBundled?:boolean; isExactAmount:boolean; matchType?:string; amountDiff?:number; accountTypeDiff?:boolean }
+  | { type:"pending"; bank:BankRow; cashier:CashierRow; isApprox:boolean; isBundled?:boolean; isExactAmount:boolean; matchType?:string; amountDiff?:number; accountTypeDiff?:boolean; matchScore?:number }
   | { type:"manualGroup"; group:ManualMatchGroup }
   | { type:"visa"; cashier:CashierRow }
+  | { type:"jawwalPay"; cashier:CashierRow }
+  | { type:"mahmoudWallet"; cashier:CashierRow }
   | { type:"unmatchedCashier"; cashier:CashierRow; reason:"اختلاف في الاسم"|"غير موجودة في البنك" }
   | { type:"unmatchedBank"; bank:BankRow; reason:"اختلاف في الاسم"|"الحوالة غير موجودة في الكاشير" };
 
-type TabId = "saved"|"pending"|"manual"|"visa"|"held"|"uCashier"|"uBank";
+type TabId = "saved"|"pending"|"manual"|"visa"|"jawwalPay"|"mahmoudWallet"|"held"|"uCashier"|"uBank"|"newMethod";
 
-// ─── إعادة المطابقة ─────────────────────────────────────────────────────────
-function retryMatchRemaining(
-  cashierRows: CashierRow[],
-  bankRows: BankRow[],
-  amountTolerance: number = 2
-): {
-  simplePairs: Array<{ cashier: CashierRow; bank: BankRow }>;
-  bundles: Array<{ cashiers: CashierRow[]; banks: BankRow[] }>;
-} {
-  const usedC = new Set<number>();
-  const usedB = new Set<number>();
-  const simplePairs: Array<{ cashier: CashierRow; bank: BankRow }> = [];
+type AdvancedMatch = {
+  cashier: CashierRow;
+  bank: BankRow;
+  matchType: "name+amount" | "amount_only";
+  score: number;
+  reason: string;
+  amountDiff: number;
+};
 
-  cashierRows.forEach(c => {
-    if (usedC.has(c.id)) return;
-    const bestRef: { current: { bank: BankRow; rank: number } | null } = { current: null };
-    bankRows.forEach(b => {
-      if (usedB.has(b.id) || b.type !== c.type) return;
-      const diff = Math.abs(b.rawAmount - c.matchAmount);
-      if (diff > amountTolerance) return;
+function reconcileAdvanced(
+  bank: BankRow[],
+  cashier: CashierRow[],
+  savedKeys: Set<string>,
+  savedCashierIds: Set<number>,
+  savedBankIds: Set<number>,
+  visaCashierIds: Set<number>,
+): AdvancedMatch[] {
+  const usedBank = new Set<number>(savedBankIds);
+  const usedCashier = new Set<number>(savedCashierIds);
+  visaCashierIds.forEach(id => usedCashier.add(id));
+
+  const pairs: AdvancedMatch[] = [];
+
+  interface Candidate { cashier: CashierRow; bank: BankRow; score: number; matchType: "name+amount" | "amount_only"; amountDiff: number; reason: string; }
+  const allCandidates: Candidate[] = [];
+
+  cashier.forEach(c => {
+    if (usedCashier.has(c.id)) return;
+    bank.forEach(b => {
+      if (usedBank.has(b.id)) return;
+      if (c.type !== b.type) return;
+      const amountDiff = Math.abs(b.rawAmount - c.matchAmount);
+      if (amountDiff > 0.01) return;
+
       const ms = advancedMatchCheck(c.name, b.description);
-      if (!ms.isMatch) return;
-      const priority = ms.matchType === "exact" ? 4 : ms.matchType === "firstSecond" ? 3 : ms.matchType === "fourthName" ? 2 : 1;
-      const rank = priority * 100 - diff;
-      if (!bestRef.current || rank > bestRef.current.rank) bestRef.current = { bank: b, rank };
+      if (ms.isMatch) {
+        const score = ms.matchType === "exact" ? 0.95 : ms.matchType === "firstSecond" ? 0.85 : ms.matchType === "fourthName" ? 0.70 : 0.55;
+        allCandidates.push({ cashier: c, bank: b, score, matchType: "name+amount", amountDiff, reason: `تطابق اسم (${ms.matchType}) + مبلغ متطابق` });
+      } else {
+        const sim = nameSim(c.name, b.description);
+        if (sim > 0.3) {
+          allCandidates.push({ cashier: c, bank: b, score: sim * 0.3, matchType: "amount_only", amountDiff, reason: `مبلغ متطابق، تشابه اسم ${(sim*100).toFixed(0)}%` });
+        }
+      }
     });
-    const best = bestRef.current;
-    if (best) {
-      simplePairs.push({ cashier: c, bank: best.bank });
-      usedC.add(c.id);
-      usedB.add(best.bank.id);
-    }
   });
 
-  const remC = cashierRows.filter(c => !usedC.has(c.id));
-  const remB = bankRows.filter(b => !usedB.has(b.id));
-  const getBase = (name: string) => normName(name).split(" ").filter(t => t.length > 2 && t !== "al").slice(0, 2).join(" ");
-  const groups: Record<string, { cashiers: CashierRow[]; banks: BankRow[] }> = {};
-  remC.forEach(c => {
-    const k = getBase(c.name);
-    if (!k) return;
-    if (!groups[k]) groups[k] = { cashiers: [], banks: [] };
-    groups[k].cashiers.push(c);
-  });
-  remB.forEach(b => {
-    for (const k of Object.keys(groups)) {
-      const nb = normName(b.description), kT = k.split(" ");
-      if (kT.every(kt => nb.includes(kt))) { groups[k].banks.push(b); break; }
-    }
+  allCandidates.sort((a, b) => b.score - a.score);
+  allCandidates.forEach(({ cashier, bank, score, matchType, amountDiff, reason }) => {
+    if (usedCashier.has(cashier.id) || usedBank.has(bank.id)) return;
+    pairs.push({ cashier, bank, matchType, score, reason, amountDiff });
+    usedCashier.add(cashier.id);
+    usedBank.add(bank.id);
   });
 
-  const bundles: Array<{ cashiers: CashierRow[]; banks: BankRow[] }> = [];
-  Object.values(groups).forEach(g => {
-    if (!g.cashiers.length || !g.banks.length) return;
-    if (g.cashiers.length === 1 && g.banks.length === 1) return;
-    const types = new Set(g.cashiers.map(c => c.type));
-    if (types.size > 1) return;
-    const totC = g.cashiers.reduce((s, c) => s + c.matchAmount, 0);
-    const totB = g.banks.reduce((s, b) => s + b.rawAmount, 0);
-    if (Math.abs(totC - totB) > amountTolerance) return;
-    bundles.push({ cashiers: g.cashiers, banks: g.banks });
-  });
-
-  return { simplePairs, bundles };
+  return pairs.sort((a, b) => b.score - a.score);
 }
 
 function scoreCandidate(
   cashierRow: CashierRow,
   b: BankRow,
-  claimedNames: Set<string>
+  claimedNames: Set<string>,
+  aliases: Record<string, string> = {}
 ): { score:number; matchType:string; reason:string } | null {
-  const ms = advancedMatchCheck(cashierRow.name, b.description);
+  const aliasMatch = aliases[smartNameKey(cashierRow.name)] && b.description.split("/").some(segment => smartNameKey(segment) === aliases[smartNameKey(cashierRow.name)]);
+  const ms = aliasMatch ? { isMatch: true, isApprox: false, matchType: "exact" } : advancedMatchCheck(cashierRow.name, b.description);
   const diff = Math.abs(b.rawAmount - cashierRow.matchAmount);
   const amtMatch = diff <= 0.01;
 
@@ -595,7 +631,8 @@ function getSuggestions(
   rejectedPairs: Set<string>,
   savedKeys: Set<string>,
   claimedNames: Set<string>,
-  ownerMap: Map<number, {cashierId:number; score:number}>
+  ownerMap: Map<number, {cashierId:number; score:number}>,
+  aliases: Record<string, string> = {}
 ): Array<{bank:BankRow; score:number; matchType:string; amountDiff:number; reason:string}> {
   return availableBank
     .filter(b => {
@@ -604,7 +641,7 @@ function getSuggestions(
       return !rejectedPairs.has(pairKey) && !savedKeys.has(pairKey);
     })
     .map(b => {
-      const sc = scoreCandidate(cashierRow, b, claimedNames);
+      const sc = scoreCandidate(cashierRow, b, claimedNames, aliases);
       if (!sc) return null;
       const owner = ownerMap.get(b.id);
       if (owner && owner.cashierId !== cashierRow.id) return null;
@@ -618,7 +655,7 @@ function getSuggestions(
 
 // ─── Export ───────────────────────────────────────────────────────────────────
 function sanitizeSheetName(name: string, used: Set<string>): string {
-  let clean = name.replace(/[\\/?*[\]:]/g, "-").slice(0, 31).trim() || "شيت";
+  const clean = name.replace(/[\\/?*[\]:]/g, "-").slice(0, 31).trim() || "شيت";
   let final = clean;
   let i = 2;
   while (used.has(final)) {
@@ -630,7 +667,7 @@ function sanitizeSheetName(name: string, used: Set<string>): string {
   return final;
 }
 
-function doExport(results: MatchResult[], savedMatches: SavedMatch[], visaItems: VisaItem[], resumeData?: ResumeData) {
+function doExport(results: MatchResult[], savedMatches: SavedMatch[], visaItems: VisaItem[], heldItems: HeldItem[], resumeData?: ResumeData) {
   const wb = XLSX.utils.book_new();
   const usedSheetNames = new Set<string>();
   const add=(name:string,hdrs:string[],rows:unknown[][])=>{
@@ -642,29 +679,17 @@ function doExport(results: MatchResult[], savedMatches: SavedMatch[], visaItems:
   const savedRows = results.filter(r=>r.type==="saved").map((r:any) => {
     const sm = r.savedMatch as SavedMatch;
     return [
-      r.cashier.name,
-      r.bank.description,
-      sm.type,
-      r.bank.rawAmount,
-      r.cashier.amount,
-      sm.isAmountDiff ? "نعم" : "لا",
-      sm.isNameDiff ? "نعم" : "لا",
-      r.bank.accountType || "—",
-      r.cashier.accountType || "—",
-      sm.isAccountTypeDiff ? "نعم" : "لا",
-      sm.isManual ? "يدوي" : "تلقائي",
-      sm.note || "",
-      sm.matchScore ?? "",
-      sm.editorNotes || "",
-      r.bank.date,
-      r.cashier.date,
-      sm.savedAt
+      r.cashier.name, r.bank.description, sm.type, r.bank.rawAmount, r.cashier.amount,
+      sm.isAmountDiff ? "نعم" : "لا", sm.isNameDiff ? "نعم" : "لا",
+      r.bank.accountType || "—", r.cashier.accountType || "—",
+      sm.isAccountTypeDiff ? "نعم" : "لا", sm.isManual ? "يدوي" : "تلقائي",
+      sm.note || "", sm.matchScore ?? "", sm.editorNotes || "",
+      r.bank.date, r.cashier.date, sm.savedAt
     ];
   });
-  add("✅ المسيفات (المؤكدة)",
+  add("✅ المطابقات (المؤكدة)",
     ["البيان (الكاشير)","بيان البنك","النوع","مبلغ البنك","مبلغ الكاشير","اختلاف مبلغ","اختلاف اسم","نوع حساب البنك","نوع حساب الكاشير","اختلاف نوع حساب","نوع المطابقة","ملاحظة","درجة التطابق","ملاحظات المحرر","ت.البنك","ت.الكاشير","تاريخ الحفظ"],
-    savedRows
-  );
+    savedRows);
 
   const needsReview = results.filter(r=>r.type==="saved").filter((r:any) => {
     const sm = r.savedMatch as SavedMatch;
@@ -673,117 +698,69 @@ function doExport(results: MatchResult[], savedMatches: SavedMatch[], visaItems:
   const amountDiffRows = needsReview.map((r:any) => {
     const sm = r.savedMatch as SavedMatch;
     const diff = r.bank.rawAmount - r.cashier.amount;
-    const issues = [
-      sm.isAmountDiff ? "فرق مبلغ" : null,
-      sm.isAccountTypeDiff ? "فرق نوع حساب" : null,
-    ].filter(Boolean).join(" + ");
-    return [
-      r.cashier.name,
-      r.bank.description,
-      sm.type,
-      r.bank.rawAmount,
-      r.cashier.amount,
-      sm.isAmountDiff ? fmtNum(diff) : "0",
-      r.bank.accountType || "—",
-      r.cashier.accountType || "—",
-      issues,
-      sm.isManual ? "يدوي" : "تلقائي",
-      sm.note || "",
-      r.bank.date,
-      r.cashier.date
-    ];
+    const issues = [sm.isAmountDiff ? "فرق مبلغ" : null, sm.isAccountTypeDiff ? "فرق نوع حساب" : null].filter(Boolean).join(" + ");
+    return [r.cashier.name, r.bank.description, sm.type, r.bank.rawAmount, r.cashier.amount,
+      sm.isAmountDiff ? fmtNum(diff) : "0", r.bank.accountType || "—", r.cashier.accountType || "—",
+      issues, sm.isManual ? "يدوي" : "تلقائي", sm.note || "", r.bank.date, r.cashier.date];
   });
   add("⚠️ فروقات تحتاج تدقيق",
     ["البيان (الكاشير)","بيان البنك","النوع","مبلغ البنك","مبلغ الكاشير","الفرق (بنك - كاشير)","نوع حساب البنك","نوع حساب الكاشير","نوع المشكلة","نوع المطابقة","ملاحظة","ت.البنك","ت.الكاشير"],
-    amountDiffRows
-  );
+    amountDiffRows);
 
   const pendingRows = results.filter(r=>r.type==="pending").map((r:any) => [
-    r.cashier.name,
-    r.bank.description,
-    r.cashier.type,
-    r.bank.rawAmount,
-    r.cashier.amount,
-    r.isApprox ? "تقريبي" : "ممتاز",
-    r.matchType || "عادي",
-    r.amountDiff ? fmtNum(r.amountDiff) : "0",
-    r.bank.accountType || "—",
-    r.cashier.accountType || "—",
-    r.accountTypeDiff ? "نعم" : "لا",
-    r.isBundled ? "تجميع" : "فردي",
-    r.bank.date,
-    r.cashier.date
+    r.cashier.name, r.bank.description, r.cashier.type, r.bank.rawAmount, r.cashier.amount,
+    r.isApprox ? "تقريبي" : "ممتاز", r.matchType || "عادي", r.amountDiff ? fmtNum(r.amountDiff) : "0",
+    r.bank.accountType || "—", r.cashier.accountType || "—", r.accountTypeDiff ? "نعم" : "لا",
+    r.isBundled ? "تجميع" : "فردي", r.bank.date, r.cashier.date
   ]);
   add("⏳ مطابقات منتظرة (غير محفوظة)",
     ["البيان (الكاشير)","بيان البنك","النوع","مبلغ البنك","مبلغ الكاشير","الحالة","نوع المطابقة","فرق المبلغ","نوع حساب البنك","نوع حساب الكاشير","اختلاف نوع حساب","نوع التجميع","ت.البنك","ت.الكاشير"],
-    pendingRows
-  );
+    pendingRows);
 
-const manualRows = results
-  .filter((r): r is Extract<MatchResult, { type: "saved" }> => r.type === "saved" && Boolean(r.savedMatch?.isManual))
-  .map((r) => {
-    const sm = r.savedMatch;
-    return [
-      r.cashier.name,
-      r.bank.description,
-      sm.type,
-      r.bank.rawAmount,
-      r.cashier.amount,
-      r.bank.date,
-      r.cashier.date,
-      sm.note || ""
-    ];
-  });
+  const manualRows = results
+    .filter((r): r is Extract<MatchResult, { type: "saved" }> => r.type === "saved" && Boolean(r.savedMatch?.isManual))
+    .map((r) => {
+      const sm = r.savedMatch;
+      return [r.cashier.name, r.bank.description, sm.type, r.bank.rawAmount, r.cashier.amount, r.bank.date, r.cashier.date, sm.note || ""];
+    });
   add("🛠️ مطابقات يدوية (محفوظة)",
     ["البيان (الكاشير)","بيان البنك","النوع","مبلغ البنك","مبلغ الكاشير","ت.البنك","ت.الكاشير","ملاحظة"],
-    manualRows
-  );
+    manualRows);
 
-  // شيت الفيزا
-  const visaRows = visaItems.map(v => [
-    v.name,
-    v.visaNumber,
-    v.type,
-    v.amount,
-    v.date,
-    v.note || "",
-    v.movedAt
+  const visaRows = visaItems.map(v => [v.name, v.visaNumber, v.type, v.amount, v.date, v.note || "", v.movedAt]);
+  add("💳 الفيزا", ["الاسم","رقم الفيزا","النوع","المبلغ","التاريخ","ملاحظة","تاريخ النقل"], visaRows);
+  const jawwalRows = results.filter(r => r.type === "jawwalPay").map((r: any) => [
+    r.cashier.name, r.cashier.rawName, r.cashier.type, r.cashier.amount,
+    r.cashier.accountType || "—", r.cashier.date
   ]);
-  add("💳 الفيزا",
-    ["الاسم","رقم الفيزا","النوع","المبلغ","التاريخ","ملاحظة","تاريخ النقل"],
-    visaRows
-  );
+  add("جوال بي", ["الاسم","البيان الأصلي","النوع","المبلغ","نوع الحساب","التاريخ"], jawwalRows);
+  const mahmoudWalletRows = results.filter(r => r.type === "mahmoudWallet").map((r: any) => [
+    r.cashier.name, r.cashier.rawName, r.cashier.type, r.cashier.amount,
+    r.cashier.accountType || "—", r.cashier.date
+  ]);
+  add("محفظة محمود", ["الاسم","البيان الأصلي","النوع","المبلغ","نوع الحساب","التاريخ"], mahmoudWalletRows);
 
   const uCashier = results.filter(r=>r.type==="unmatchedCashier").map((r:any) => [
-    r.cashier.name,
-    r.cashier.type,
-    r.cashier.amount,
-    r.cashier.date,
-    r.reason
-  ]);
-  add("❌ مشاكل كاشير (غير متطابق)",
-    ["البيان","النوع","المبلغ","التاريخ","السبب"],
-    uCashier
-  );
+    r.cashier.name, r.cashier.type, r.cashier.amount, r.cashier.accountType || "—", r.cashier.date, r.reason]);
+  add("فواتير لم يجد لها حوالات مطابقة", ["البيان","النوع","المبلغ","نوع الحساب المسجل","اسم المستخدم","التاريخ","السبب"], uCashier.map((row, index) => {
+    const item = results.filter(r => r.type === "unmatchedCashier")[index] as any;
+    return [...row.slice(0, 3), row[3], item?.cashier?.rawName || "—", row[4], row[5]];
+  }));
 
   const uBank = results.filter(r=>r.type==="unmatchedBank").map((r:any) => [
-    r.bank.description,
-    r.bank.type,
-    r.bank.rawAmount,
-    r.bank.date,
-    r.reason
-  ]);
-  add("🏛️ مشاكل بنك (غير متطابق)",
-    ["بيان البنك","النوع","المبلغ","التاريخ","السبب"],
-    uBank
-  );
+    r.bank.description, r.bank.type, r.bank.rawAmount, r.bank.accountType || "—", r.bank.date, r.reason]);
+  add("حوالات لم يجد لها فواتير مسجلة", ["البيان","النوع","المبلغ","نوع الحساب المسجل","التاريخ","السبب"], uBank);
+
+  const heldRows = heldItems.map(h => {
+    const isBank = h.kind === "bank";
+    const label = isBank ? (h.data as BankRow).description : (h.data as CashierRow).name;
+    const amt = isBank ? (h.data as BankRow).rawAmount : (h.data as CashierRow).amount;
+    return [ isBank ? "بنك" : "كاشير", label, h.data.type, amt, h.data.accountType || "—", h.heldAt, h.note || "" ];
+  });
+  add("🗂️ المعلقات", ["المصدر","البيان","النوع","المبلغ","نوع الحساب","تاريخ التعليق","ملاحظة"], heldRows);
 
   if (resumeData) {
-    try {
-      embedResumeSheet(wb, resumeData);
-    } catch (e) {
-      console.error("تعذّر تضمين بيانات الاستكمال بالملف:", e);
-    }
+    try { embedResumeSheet(wb, resumeData); } catch (e) { console.error("تعذّر تضمين بيانات الاستكمال بالملف:", e); }
   }
   XLSX.writeFile(wb,"تقرير_التسوية.xlsx");
 }
@@ -847,7 +824,6 @@ async function extractResumeData(file: File): Promise<ResumeData | null> {
   }
 }
 
-
 function autoDetect(headers: string[], hints: string[]): string {
   const scores=headers.map(h=>({h,s:hints.reduce((a,hint)=>a+(h.toLowerCase().includes(hint.toLowerCase())?1:0),0)})).sort((a,b)=>b.s-a.s);
   return scores[0]?.s>0?scores[0].h:"";
@@ -859,6 +835,7 @@ const HINTS={
   credit: ["credit","دائن","إيداع","received","deposit","cr","دخول","مستلم","مبالغ مستلمة"],
   name:   ["name","اسم","customer","client","employee","موظف","عميل","الزبون","بيان","وصف","narrative","detail","إيضاح"],
   accountType: ["account type","account_type","نوع الحساب","نوع حساب","نوع","حساب","account"],
+  ref:    ["reference","ref","transaction","trx","id","reference no","reference number","مرجع","رقم المرجع","رقم الحركة","رقم الحوالة","transaction id","txn","voucher","سند","رقم"],
 };
 
 // ─── DropZone ─────────────────────────────────────────────────────────────────
@@ -1033,8 +1010,16 @@ function ManualWorkbench({
     return rows;
   },[cashierRows,cashierSearch,cashierSort,matchedCashierIds,savedCashierIds]);
 
-  const toggleBank=(id:number)=>setSelectedBankIds(p=>{const n=new Set(p);n.has(id)?n.delete(id):n.add(id);return n;});
-  const toggleCashier=(id:number)=>setSelectedCashierIds(p=>{const n=new Set(p);n.has(id)?n.delete(id):n.add(id);return n;});
+  const toggleBank=(id:number)=>setSelectedBankIds(p=>{
+    const n=new Set(p);
+    if (n.has(id)) n.delete(id); else n.add(id);
+    return n;
+  });
+  const toggleCashier=(id:number)=>setSelectedCashierIds(p=>{
+    const n=new Set(p);
+    if (n.has(id)) n.delete(id); else n.add(id);
+    return n;
+  });
 
   const handleMatch=()=>{
     if (!selectedBankIds.size||!selectedCashierIds.size) return;
@@ -1054,7 +1039,7 @@ function ManualWorkbench({
     if (selectedBankIds.size>0 && selectedCashierIds.size>0 && !amtMatch && !noteInput) {
       setNoteInput(`اختلاف مبلغ: ${fmtNum(Math.abs(selBTotal-selCTotal))}`);
     }
-  }, [selectedBankIds.size, selectedCashierIds.size, amtMatch]);
+  }, [selectedBankIds.size, selectedCashierIds.size, amtMatch, noteInput, selBTotal, selCTotal]);
 
   return (
     <div dir="rtl" className="min-h-screen bg-background text-foreground">
@@ -1117,7 +1102,7 @@ function ManualWorkbench({
           <button onClick={handleMatch}
             className="w-full py-3.5 rounded-xl font-medium flex items-center justify-center gap-2 text-sm transition-colors bg-green-600 hover:bg-green-700 text-white">
             <Save className="w-5 h-5"/>
-            حفظ {selectedBankIds.size} حوالة بنكية ↔ {selectedCashierIds.size} فاتورة كاشير (تؤكد فوراً)
+            حفظ {selectedBankIds.size} حوالة بنكية ↔ {selectedCashierIds.size} فاتورة كاشier (تؤكد فوراً)
             {!amtMatch&&<span className="text-xs opacity-80">(مجاميع مختلفة)</span>}
           </button>
         )}
@@ -1363,16 +1348,6 @@ interface SavedProject {
   returnedHeldCashier?: CashierRow[];
 }
 
-interface HeldItem {
-  id: string;
-  kind: "bank" | "cashier";
-  refId: number;
-  fileSessionId: number;
-  data: BankRow | CashierRow;
-  heldAt: string;
-  note?: string;
-}
-
 async function loadProjectsList(): Promise<SavedProject[]> {
   return storageGet<SavedProject[]>("recon_projects", []);
 }
@@ -1478,11 +1453,160 @@ function FilterBar({
   );
 }
 
+// ─── لوحة السحب والاستبدال (تظهر جمب الجدول وتزيحه) ──────────────────────────
+function MatchDrawer({
+  mode, cashier, oldBank, nameSearch, amountFrom, amountTo, banks, cashiers, draggedItemId,
+  onNameSearch, onAmountFrom, onAmountTo, onDragStart, onDragEnd, onReplaceBank, onReplaceCashier, onClose
+}: {
+  mode: "bank" | "cashier"; cashier: CashierRow; oldBank: BankRow;
+  nameSearch: string; amountFrom: string; amountTo: string;
+  banks: BankRow[]; cashiers: CashierRow[]; draggedItemId: number | null;
+  onNameSearch: (v:string)=>void; onAmountFrom: (v:string)=>void; onAmountTo: (v:string)=>void;
+  onDragStart: (id:number)=>void; onDragEnd: ()=>void;
+  onReplaceBank: (b:BankRow)=>void; onReplaceCashier: (c:CashierRow)=>void; onClose: ()=>void;
+}) {
+  const [position, setPosition] = useState({ x: 0, y: 0 });
+  const dragState = useRef<{ startX: number; startY: number; originX: number; originY: number } | null>(null);
+  const handleDragMove = (event: PointerEvent) => {
+    const current = dragState.current;
+    if (!current) return;
+    setPosition({
+      x: current.originX + event.clientX - current.startX,
+      y: current.originY + event.clientY - current.startY
+    });
+  };
+  const stopDragging = () => {
+    dragState.current = null;
+    window.removeEventListener("pointermove", handleDragMove);
+    window.removeEventListener("pointerup", stopDragging);
+  };
+  const startDragging = (event: React.PointerEvent<HTMLDivElement>) => {
+    if ((event.target as HTMLElement).closest("button, input, select")) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragState.current = { startX: event.clientX, startY: event.clientY, originX: position.x, originY: position.y };
+    window.addEventListener("pointermove", handleDragMove);
+    window.addEventListener("pointerup", stopDragging);
+  };
+  return (
+    <div
+      className="fixed z-50 w-[550px] max-w-[95vw] h-[70vh] max-h-[calc(100vh-2rem)] bg-white border border-border rounded-xl shadow-2xl flex flex-col overflow-hidden isolate"
+      style={{ top: "15vh", right: "1rem", transform: `translate(${position.x}px, ${position.y}px)` }}
+      dir="rtl"
+    >
+      <div
+        onPointerDown={startDragging}
+        className={`flex cursor-move items-center justify-between gap-3 px-4 py-3.5 text-white shrink-0 select-none ${mode === "bank" ? "bg-gradient-to-l from-blue-600 to-indigo-600" : "bg-gradient-to-l from-emerald-600 to-teal-600"}`}
+      >
+        <div className="min-w-0 flex items-center gap-2.5">
+          <span className="flex items-center justify-center w-9 h-9 rounded-xl bg-white/15 shrink-0">
+            {mode === "bank" ? <Landmark className="w-5 h-5"/> : <Users className="w-5 h-5"/>}
+          </span>
+          <div className="min-w-0">
+            <div className="text-[11px] text-white/80">{mode === "bank" ? "قائمة سحب الحوالات" : "قائمة سحب فواتير الكاشير"} · اسحب من هنا لتحريك اللوحة</div>
+            <div className="max-w-[min(480px,42vw)] whitespace-normal break-words text-sm font-bold leading-6">{mode === "bank" ? cashier.name : oldBank.description}</div>
+          </div>
+        </div>
+        <button onClick={onClose} className="p-1.5 hover:bg-white/15 rounded-lg transition-colors shrink-0"><X className="w-4 h-4"/></button>
+      </div>
+
+      <div className="px-4 py-3 border-b border-border bg-slate-50 space-y-1.5 shrink-0">
+        <div className="flex items-center gap-2 flex-wrap text-xs">
+          <span className={`font-semibold px-2 py-0.5 rounded-full ${(mode === "bank" ? cashier.type : oldBank.type) === "مدفوع" ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700"}`}>
+            {mode === "bank" ? cashier.type : oldBank.type}
+          </span>
+          <span className="font-mono font-bold text-indigo-700">{fmtNum(mode === "bank" ? cashier.matchAmount : oldBank.rawAmount)}</span>
+        </div>
+        <div className="text-[11px] text-muted-foreground">
+          {mode === "bank"
+            ? <>سيتم استبدال الحوالة الحالية: <span className="text-foreground font-medium">{oldBank.description}</span> ({fmtNum(oldBank.rawAmount)})</>
+            : <>سيتم استبدال الفاتورة الحالية: <span className="text-foreground font-medium">{cashier.name}</span> ({fmtNum(cashier.matchAmount)})</>}
+        </div>
+      </div>
+
+      <div className="px-4 py-3 border-b border-border space-y-2 bg-white shrink-0">
+        <div className="relative">
+          <Search className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground"/>
+          <input value={nameSearch} onChange={e => onNameSearch(e.target.value)}
+            placeholder={mode === "bank" ? "بحث ببيان الحوالة..." : "بحث باسم الفاتورة..."}
+            className="w-full pl-3 pr-9 py-2 text-sm border border-border rounded-lg bg-input-background focus:outline-none focus:ring-1 focus:ring-ring"/>
+        </div>
+        <div className="flex items-center gap-2">
+          <input type="number" value={amountFrom} onChange={e => onAmountFrom(e.target.value)} placeholder="من مبلغ"
+            className="flex-1 rounded-lg border border-border bg-input-background px-2.5 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring"/>
+          <span className="text-muted-foreground text-xs">إلى</span>
+          <input type="number" value={amountTo} onChange={e => onAmountTo(e.target.value)} placeholder="إلى مبلغ"
+            className="flex-1 rounded-lg border border-border bg-input-background px-2.5 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring"/>
+        </div>
+        <div className="text-[10px] text-muted-foreground leading-relaxed">
+          اسحب {mode === "bank" ? "الحوالة" : "الفاتورة"} من القائمة وأفلتها فوق خانة {mode === "bank" ? "«بيان البنك»" : "«البيان (الكاشير)»"} بالجدول جنب هاي اللوحة، أو اضغط زر "استبدال".
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto bg-white">
+        {mode === "bank" ? (
+          banks.length === 0 ? (
+            <div className="flex flex-col items-center justify-center gap-2 p-10 text-center text-xs text-muted-foreground"><Search className="w-8 h-8 opacity-30"/>لا توجد حوالات تطابق البحث.</div>
+          ) : banks.map(b => {
+            const diff = Math.abs(b.rawAmount - cashier.matchAmount);
+            const exact = diff <= 0.01;
+            const sim = nameSim(cashier.name, b.description);
+            const isDragged = draggedItemId === b.id;
+            return (
+              <div key={b.id} draggable onDragStart={() => onDragStart(b.id)} onDragEnd={onDragEnd}
+                className={`group flex items-center gap-3 px-4 py-3 border-b border-border last:border-b-0 cursor-grab active:cursor-grabbing hover:bg-blue-50 transition-colors ${isDragged ? "opacity-40" : ""}`}>
+                <GripVertical className="w-4 h-4 text-muted-foreground/40 shrink-0"/>
+                <div className="flex-1 min-w-0">
+                  <div className="whitespace-normal break-words text-sm font-medium leading-6">{b.description}</div>
+                  <div className="flex items-center gap-2 mt-1 flex-wrap">
+                    <span className="font-mono font-bold text-blue-700 text-sm">{fmtNum(b.rawAmount)}</span>
+                    {exact ? <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 border border-green-300">نفس المبلغ</span>
+                      : <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 border border-amber-300">فرق: {fmtNum(diff)}</span>}
+                    <span className="text-[10px] text-muted-foreground">تشابه: {(sim*100).toFixed(0)}%</span>
+                    {b.accountType && <span className="text-[10px] text-muted-foreground">| {b.accountType}</span>}
+                  </div>
+                </div>
+                <button onClick={() => onReplaceBank(b)} className="px-2.5 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 transition-colors shrink-0">استبدال</button>
+              </div>
+            );
+          })
+        ) : (
+          cashiers.length === 0 ? (
+            <div className="flex flex-col items-center justify-center gap-2 p-10 text-center text-xs text-muted-foreground"><Search className="w-8 h-8 opacity-30"/>لا توجد فواتير كاشير تطابق البحث.</div>
+          ) : cashiers.map(c => {
+            const diff = Math.abs(c.matchAmount - oldBank.rawAmount);
+            const exact = diff <= 0.01;
+            const sim = nameSim(oldBank.description, c.name);
+            const isDragged = draggedItemId === c.id;
+            return (
+              <div key={c.id} draggable onDragStart={() => onDragStart(c.id)} onDragEnd={onDragEnd}
+                className={`group flex items-center gap-3 px-4 py-3 border-b border-border last:border-b-0 cursor-grab active:cursor-grabbing hover:bg-emerald-50 transition-colors ${isDragged ? "opacity-40" : ""}`}>
+                <GripVertical className="w-4 h-4 text-muted-foreground/40 shrink-0"/>
+                <div className="flex-1 min-w-0">
+                  <div className="whitespace-normal break-words text-sm font-medium leading-6">{c.name}</div>
+                  <div className="flex items-center gap-2 mt-1 flex-wrap">
+                    <span className="font-mono font-bold text-emerald-700 text-sm">{fmtNum(c.matchAmount)}</span>
+                    {exact ? <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 border border-green-300">نفس المبلغ</span>
+                      : <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 border border-amber-300">فرق: {fmtNum(diff)}</span>}
+                    <span className="text-[10px] text-muted-foreground">تشابه: {(sim*100).toFixed(0)}%</span>
+                    {c.accountType && <span className="text-[10px] text-muted-foreground">| {c.accountType}</span>}
+                  </div>
+                </div>
+                <button onClick={() => onReplaceCashier(c)} className="px-2.5 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 transition-colors shrink-0">استبدال</button>
+              </div>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
-type PageId = "main" | "manual" | "assist" | "recon2";
+type PageId = "main" | "manual" | "assist" | "recon2" | "recon2StageA" | "recon2Visa";
 
 export default function App() {
-  const [page, setPage] = useState<PageId>("main");
+  const [page, setPage] = useState<PageId>("recon2");
+  const [mainMode, setMainMode] = useState<"default" | "stageB">("default");
   const [sessionLoaded, setSessionLoaded] = useState(false);
   const [showDeleteMenu, setShowDeleteMenu] = useState(false);
   const [sessionRestoredNotice, setSessionRestoredNotice] = useState(false);
@@ -1490,16 +1614,25 @@ export default function App() {
   const [bankFile, setBankFile]   = useState<File|null>(null);
   const [bankHeaders, setBankH]   = useState<string[]>([]);
   const [bankRowsRaw, setBankRows] = useState<Record<string,unknown>[]>([]);
-  const [bankMap, setBankMap]     = useState({ date:"", desc:"", debit:"", credit:"", accountType:"" });
+  const [bankMap, setBankMap]     = useState({ date:"", desc:"", debit:"", credit:"", accountType:"", ref:"" });
   const [bankSwap, setBankSwap]   = useState(false);
   const [bankFileSessionId, setBankFileSessionId] = useState(0);
 
   const [cashFile, setCashFile]   = useState<File|null>(null);
   const [cashHeaders, setCashH]   = useState<string[]>([]);
   const [cashRowsRaw, setCashRows] = useState<Record<string,unknown>[]>([]);
-  const [cashMap, setCashMap]     = useState({ date:"", name:"", debit:"", credit:"", accountType:"" });
+  const [cashMap, setCashMap]     = useState({ date:"", name:"", debit:"", credit:"", accountType:"", ref:"" });
   const [cashSwap, setCashSwap]   = useState(false);
   const [cashFileSessionId, setCashFileSessionId] = useState(0);
+  const [stageAInvoices, setStageAInvoices] = useState<StageAResult[]>([]);
+  const [walletBankFile, setWalletBankFile] = useState<File|null>(null);
+  const [walletBankHeaders, setWalletBankHeaders] = useState<string[]>([]);
+  const [walletBankRows, setWalletBankRows] = useState<Record<string,unknown>[]>([]);
+  const [walletBankMap, setWalletBankMap] = useState({ date:"", desc:"", debit:"", credit:"", ref:"" });
+  const [walletCashFile, setWalletCashFile] = useState<File|null>(null);
+  const [walletCashHeaders, setWalletCashHeaders] = useState<string[]>([]);
+  const [walletCashRows, setWalletCashRows] = useState<Record<string,unknown>[]>([]);
+  const [walletCashMap, setWalletCashMap] = useState({ date:"", name:"", debit:"", credit:"", ref:"" });
 
   const [loading, setLoading] = useState(false);
   const [error, setError]     = useState<string|null>(null);
@@ -1508,20 +1641,25 @@ export default function App() {
 
   const [manualGroups, setManualGroups]     = useState<ManualMatchGroup[]>([]);
   const [savedMatches, setSavedMatches]     = useState<SavedMatch[]>([]);
+  const [nameAliases, setNameAliases]       = useState<Record<string, string>>({});
   const [rejectedPairs, setRejected]        = useState<Set<string>>(new Set());
   const [expandedMatchKey, setExpandedMatchKey] = useState<string|null>(null);
   const [expandedUnmatchedCashier, setExpandedUnmatchedCashier] = useState<number|null>(null);
   const [selectedPendingKeys, setSelectedPendingKeys] = useState<Set<string>>(new Set());
+  const [selectedAdvancedKeys, setSelectedAdvancedKeys] = useState<Set<string>>(new Set());
+
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [drawerMode, setDrawerMode] = useState<"bank" | "cashier">("bank");
   const [drawerCashier, setDrawerCashier] = useState<CashierRow | null>(null);
   const [drawerOldBank, setDrawerOldBank] = useState<BankRow | null>(null);
   const [drawerNameSearch, setDrawerNameSearch] = useState("");
   const [drawerAmountFrom, setDrawerAmountFrom] = useState("");
   const [drawerAmountTo, setDrawerAmountTo] = useState("");
-  const [draggedBankId, setDraggedBankId] = useState<number | null>(null);
+  const [draggedItemId, setDraggedItemId] = useState<number | null>(null);
   const [dropTargetKey, setDropTargetKey] = useState<string | null>(null);
   const [pendingPage, setPendingPage] = useState(1);
   const PENDING_PAGE_SIZE = 20;
+  const pendingRowRefs = useRef<Record<string, HTMLTableRowElement | null>>({});
   const [amountTolerancePercent, setAmountTolerancePercent] = useState(0.5);
   const [showSettings, setShowSettings] = useState(false);
   const [resultSearch, setResultSearch] = useState("");
@@ -1530,15 +1668,15 @@ export default function App() {
   const [maxAmount, setMaxAmount] = useState("");
   const [toast, setToast] = useState<string | null>(null);
 
-  // ─── الفيزا: عناصر منقولة لخانة الفيزا ───────────────────────────────────────
   const [visaItems, setVisaItems] = useState<VisaItem[]>([]);
+  const [advancedResults, setAdvancedResults] = useState<AdvancedMatch[]>([]);
 
-  // ─── معلقات ───────────────────────────────────────────────────────────────
   const [heldItems, setHeldItems] = useState<HeldItem[]>([]);
   const [returnedHeldBank, setReturnedHeldBank] = useState<BankRow[]>([]);
   const [returnedHeldCashier, setReturnedHeldCashier] = useState<CashierRow[]>([]);
+  const [rejectedSpecialCashierIds, setRejectedSpecialCashierIds] = useState<Set<number>>(new Set());
+  const skipNextAutoReconcile = useRef(false);
 
-  // ─── استرجاع الجلسة السابقة تلقائياً ──────────────────────────────────────
   useEffect(() => {
     (async () => {
       const session = await storageGet<any>("current_session", null);
@@ -1553,13 +1691,22 @@ export default function App() {
         setCashMap({ date:"", name:"", debit:"", credit:"", accountType:"", ...(session.cashMap||{}) });
         setCashSwap(!!session.cashSwap);
         setCashFileSessionId(session.cashFileSessionId ?? 0);
+        setWalletBankHeaders(session.walletBankHeaders || []);
+        setWalletBankRows(session.walletBankRows || []);
+        setWalletBankMap({ date:"", desc:"", debit:"", credit:"", ref:"", ...(session.walletBankMap || {}) });
+        setWalletCashHeaders(session.walletCashHeaders || []);
+        setWalletCashRows(session.walletCashRows || []);
+        setWalletCashMap({ date:"", name:"", debit:"", credit:"", ref:"", ...(session.walletCashMap || {}) });
         setManualGroups(session.manualGroups || []);
         setSavedMatches(session.savedMatches || []);
+        setNameAliases(session.nameAliases || {});
         setRejected(new Set(session.rejectedPairs || []));
         setVisaItems(session.visaItems || []);
         setHeldItems(session.heldItems || []);
         setReturnedHeldBank(session.returnedHeldBank || []);
         setReturnedHeldCashier(session.returnedHeldCashier || []);
+        setRejectedSpecialCashierIds(new Set(session.rejectedSpecialCashierIds || []));
+        setAdvancedResults(session.advancedResults || []);
         if ((session.bankRowsRaw?.length || session.savedMatches?.length)) {
           setSessionRestoredNotice(true);
         }
@@ -1568,44 +1715,64 @@ export default function App() {
     })();
   }, []);
 
-  // ─── حفظ تلقائي مستمر ──────────────────────────────────────────────────────
   useEffect(() => {
     if (!sessionLoaded) return;
     const t = setTimeout(() => {
       storageSet("current_session", {
         bankHeaders, bankRowsRaw, bankMap, bankSwap, bankFileSessionId,
         cashHeaders, cashRowsRaw, cashMap, cashSwap, cashFileSessionId,
-        manualGroups, savedMatches,
+        walletBankHeaders, walletBankRows, walletBankMap,
+        walletCashHeaders, walletCashRows, walletCashMap,
+        manualGroups, savedMatches, nameAliases,
         rejectedPairs: Array.from(rejectedPairs),
-        visaItems, heldItems, returnedHeldBank, returnedHeldCashier
+        visaItems, heldItems, returnedHeldBank, returnedHeldCashier, rejectedSpecialCashierIds, advancedResults
       });
     }, 500);
     return () => clearTimeout(t);
   }, [
     sessionLoaded, bankHeaders, bankRowsRaw, bankMap, bankSwap, bankFileSessionId,
     cashHeaders, cashRowsRaw, cashMap, cashSwap, cashFileSessionId,
-    manualGroups, savedMatches, rejectedPairs,
-    visaItems, heldItems, returnedHeldBank, returnedHeldCashier
+    walletBankHeaders, walletBankRows, walletBankMap,
+    walletCashHeaders, walletCashRows, walletCashMap,
+    manualGroups, savedMatches, nameAliases, rejectedPairs,
+    visaItems, heldItems, returnedHeldBank, returnedHeldCashier, rejectedSpecialCashierIds, advancedResults
   ]);
-
 
   const loadBank=async(f:File)=>{
     setBankFile(f);setError(null);setResults(null);
     try {
       const {headers,rows}=parseSheet(await readFileBuf(f));
       setBankH(headers);setBankRows(rows);
-      setBankMap({date:autoDetect(headers,HINTS.date),desc:autoDetect(headers,HINTS.desc),debit:autoDetect(headers,HINTS.debit),credit:autoDetect(headers,HINTS.credit),accountType:autoDetect(headers,HINTS.accountType)});
+      setBankMap({date:autoDetect(headers,HINTS.date),desc:autoDetect(headers,HINTS.desc),debit:autoDetect(headers,HINTS.debit),credit:autoDetect(headers,HINTS.credit),accountType:autoDetect(headers,HINTS.accountType),ref:autoDetect(headers,HINTS.ref)});
       setBankFileSessionId(id => id + 1);
     } catch(e){setError((e as Error).message);}
   };
   const loadCash=async(f:File)=>{
     setCashFile(f);setError(null);setResults(null);
+    setRejectedSpecialCashierIds(new Set());
     try {
       const {headers,rows}=parseSheet(await readFileBuf(f));
       setCashH(headers);setCashRows(rows);
-      setCashMap({date:autoDetect(headers,HINTS.date),name:autoDetect(headers,HINTS.name),debit:autoDetect(headers,HINTS.debit),credit:autoDetect(headers,HINTS.credit),accountType:autoDetect(headers,HINTS.accountType)});
+      setCashMap({date:autoDetect(headers,HINTS.date),name:autoDetect(headers,HINTS.name),debit:autoDetect(headers,HINTS.debit),credit:autoDetect(headers,HINTS.credit),accountType:autoDetect(headers,HINTS.accountType),ref:autoDetect(headers,HINTS.ref)});
       setCashFileSessionId(id => id + 1);
     } catch(e){setError((e as Error).message);}
+  };
+  const loadWalletBank = async (f: File) => {
+    setWalletBankFile(f); setError(null); setResults(null);
+    try {
+      const { headers, rows } = parseSheet(await readFileBuf(f));
+      setWalletBankHeaders(headers); setWalletBankRows(rows);
+      setWalletBankMap({ date:autoDetect(headers,HINTS.date), desc:autoDetect(headers,HINTS.desc), debit:autoDetect(headers,HINTS.debit), credit:autoDetect(headers,HINTS.credit), ref:autoDetect(headers,HINTS.ref) });
+    } catch (e) { setError((e as Error).message); }
+  };
+  const loadWalletCash = async (f: File) => {
+    setWalletCashFile(f); setError(null); setResults(null);
+    setRejectedSpecialCashierIds(new Set());
+    try {
+      const { headers, rows } = parseSheet(await readFileBuf(f));
+      setWalletCashHeaders(headers); setWalletCashRows(rows);
+      setWalletCashMap({ date:autoDetect(headers,HINTS.date), name:autoDetect(headers,HINTS.name), debit:autoDetect(headers,HINTS.debit), credit:autoDetect(headers,HINTS.credit), ref:autoDetect(headers,HINTS.ref) });
+    } catch (e) { setError((e as Error).message); }
   };
 
   const parsedBank = useMemo(():BankRow[]=>{
@@ -1618,32 +1785,30 @@ export default function App() {
       let rawAmount = 0;
       let type: "مدفوع" | "مستلم" = "مستلم";
 
-      if (debit > 0 && credit === 0) {
-        rawAmount = debit;
-        type = "مدفوع";
-      } else if (credit > 0 && debit === 0) {
-        rawAmount = credit;
-        type = "مستلم";
-      } else if (debit > 0 && credit > 0) {
-        rawAmount = debit;
-        type = "مدفوع";
-      }
+      if (debit > 0 && credit === 0) { rawAmount = debit; type = "مدفوع"; }
+      else if (credit > 0 && debit === 0) { rawAmount = credit; type = "مستلم"; }
+      else if (debit > 0 && credit > 0) { rawAmount = debit; type = "مدفوع"; }
 
       if (rawAmount === 0) return null;
 
       return {
-        id:i,
-        date:fmtDate(bankMap.date?r[bankMap.date]:""),
+        id:i, date:fmtDate(bankMap.date?r[bankMap.date]:""),
         description:String(bankMap.desc?r[bankMap.desc]:"").trim(),
-        debit,
-        credit,
-        rawAmount,
-        type,
-        accountType: String((bankMap as any).accountType ? r[(bankMap as any).accountType] : "").trim(),
+        debit, credit, rawAmount, type,
+        accountType: "بنك فلسطين",
+        ref: String((bankMap as any).ref ? r[(bankMap as any).ref] : "").trim(),
         orig:r
       };
     }).filter((r): r is BankRow => r !== null);
   },[bankRowsRaw,bankMap,bankSwap]);
+
+  const parseWalletBankRows = useMemo(():BankRow[] => walletBankRows.map((r,i) => {
+    const debitRaw = Math.abs(toNum(walletBankMap.debit ? r[walletBankMap.debit] : 0));
+    const creditRaw = Math.abs(toNum(walletBankMap.credit ? r[walletBankMap.credit] : 0));
+    const rawAmount = debitRaw || creditRaw;
+    if (!rawAmount) return null;
+    return { id: 1000000 + i, date:fmtDate(walletBankMap.date ? r[walletBankMap.date] : ""), description:String(walletBankMap.desc ? r[walletBankMap.desc] : "").trim(), debit:debitRaw, credit:creditRaw, rawAmount, type:debitRaw ? "مدفوع" : "مستلم", accountType:"محفظة تجارية", ref:String(walletBankMap.ref ? r[walletBankMap.ref] : "").trim(), orig:r };
+  }).filter((r): r is BankRow => r !== null), [walletBankRows, walletBankMap]);
 
   const parsedCashier = useMemo(():CashierRow[]=>{
     const rows = cashRowsRaw.map((r,i)=>{
@@ -1658,49 +1823,50 @@ export default function App() {
       let amount = 0;
       let type: "مدفوع" | "مستلم" = "مستلم";
 
-      if (debit > 0 && credit === 0) {
-        amount = debit;
-        type = "مدفوع";
-      } else if (credit > 0 && debit === 0) {
-        amount = credit;
-        type = "مستلم";
-      } else if (debit > 0 && credit > 0) {
-        amount = debit;
-        type = "مدفوع";
-      }
+      if (debit > 0 && credit === 0) { amount = debit; type = "مدفوع"; }
+      else if (credit > 0 && debit === 0) { amount = credit; type = "مستلم"; }
+      else if (debit > 0 && credit > 0) { amount = debit; type = "مدفوع"; }
 
       if (amount === 0 && !ma) return null;
 
       return {
-        id:i,
-        rawName,
-        name,
-        notes,
-        splitExpr,
-        debit,
-        credit,
-        amount,
-        matchAmount: ma ?? amount,
-        type,
-        accountType: String((cashMap as any).accountType ? r[(cashMap as any).accountType] : "").trim(),
-        date:fmtDate(cashMap.date?r[cashMap.date]:""),
-        orig:r
+        id:i, rawName, name, notes, splitExpr, debit, credit, amount,
+        matchAmount: ma ?? amount, type,
+        accountType: "بنك فلسطين",
+        ref: String((cashMap as any).ref ? r[(cashMap as any).ref] : "").trim(),
+        date:fmtDate(cashMap.date?r[cashMap.date]:""), orig:r
       };
     }).filter((r): r is CashierRow => r !== null);
 
     return rows;
   },[cashRowsRaw,cashMap,cashSwap]);
 
+  const parsedWalletCashier = useMemo(():CashierRow[] => walletCashRows.map((r,i) => {
+    const rawName = String(walletCashMap.name ? r[walletCashMap.name] : "").trim();
+    const { name, notes } = parseCashierName(rawName);
+    const { splitExpr, matchAmount: ma } = parseNotes(notes);
+    const debit = Math.abs(toNum(walletCashMap.debit ? r[walletCashMap.debit] : 0));
+    const credit = Math.abs(toNum(walletCashMap.credit ? r[walletCashMap.credit] : 0));
+    const amount = debit || credit || ma || 0;
+    if (!amount) return null;
+    return { id: 2000000 + i, rawName, name, notes, splitExpr, debit, credit, amount, matchAmount:ma ?? amount, type:debit ? "مدفوع" : "مستلم", accountType:"محفظة تجارية", ref:String(walletCashMap.ref ? r[walletCashMap.ref] : "").trim(), date:fmtDate(walletCashMap.date ? r[walletCashMap.date] : ""), orig:r };
+  }).filter((r): r is CashierRow => r !== null), [walletCashRows, walletCashMap]);
+
   const heldBankKeys = useMemo(() => new Set(heldItems.filter(h=>h.kind==="bank").map(h => `${h.fileSessionId}:${h.refId}`)), [heldItems]);
   const heldCashierKeys = useMemo(() => new Set(heldItems.filter(h=>h.kind==="cashier").map(h => `${h.fileSessionId}:${h.refId}`)), [heldItems]);
 
   const activeBank = useMemo(
-    () => [...parsedBank.filter(b => !heldBankKeys.has(`${bankFileSessionId}:${b.id}`)), ...returnedHeldBank],
-    [parsedBank, heldBankKeys, bankFileSessionId, returnedHeldBank]
+    () => [...parsedBank.filter(b => !heldBankKeys.has(`${bankFileSessionId}:${b.id}`)), ...parseWalletBankRows, ...returnedHeldBank],
+    [parsedBank, parseWalletBankRows, heldBankKeys, bankFileSessionId, returnedHeldBank]
   );
   const activeCashier = useMemo(
-    () => [...parsedCashier.filter(c => !heldCashierKeys.has(`${cashFileSessionId}:${c.id}`)), ...returnedHeldCashier],
-    [parsedCashier, heldCashierKeys, cashFileSessionId, returnedHeldCashier]
+    () => [...(stageAInvoices.length ? stageAInvoices.map((invoice, index) => ({
+      id: 3000000 + index, rawName: invoice.originalName, name: invoice.name, notes: invoice.issue, splitExpr: "",
+      debit: invoice.amount, credit: 0, amount: invoice.amount, matchAmount: invoice.amount,
+      type: "مدفوع" as const, accountType: invoice.source === "محفظة تجارية" ? "محفظة تجارية" : "بنك فلسطين",
+      ref: invoice.invoiceNumber, date: invoice.registrationTime, orig: invoice.invoice
+    })) : parsedCashier.filter(c => !heldCashierKeys.has(`${cashFileSessionId}:${c.id}`))), ...parsedWalletCashier, ...returnedHeldCashier],
+    [stageAInvoices, parsedCashier, parsedWalletCashier, heldCashierKeys, cashFileSessionId, returnedHeldCashier]
   );
 
   const savedKeys = useMemo(() => new Set(savedMatches.map(s => `${s.cashierId}-${s.bankId}`)), [savedMatches]);
@@ -1725,8 +1891,14 @@ export default function App() {
     return s;
   }, [savedMatches]);
 
-  // أرقام الفيزا المحجوزة — نمنع تكرار نفس الرقم لفاتورة مختلفة
   const visaCashierIds = useMemo(() => new Set(visaItems.map(v => v.cashierId)), [visaItems]);
+  const jawwalPayCashierIds = useMemo(() => new Set(
+    activeCashier.filter(c => !rejectedSpecialCashierIds.has(c.id) && /جوال\s*بي|jawwal\s*pay/i.test(`${c.rawName} ${c.name}`)).map(c => c.id)
+  ), [activeCashier, rejectedSpecialCashierIds]);
+  const mahmoudWalletCashierIds = useMemo(() => new Set(
+    activeCashier.filter(c => !rejectedSpecialCashierIds.has(c.id) && /محفظة\s+محمود/i.test(`${c.rawName} ${c.name}`)).map(c => c.id)
+  ), [activeCashier, rejectedSpecialCashierIds]);
+  const specialCashierIds = useMemo(() => new Set([...jawwalPayCashierIds, ...mahmoudWalletCashierIds]), [jawwalPayCashierIds, mahmoudWalletCashierIds]);
 
   const savedRows = useMemo(
     () => (results?.filter(r => r.type === "saved") as any[] ?? []).sort((a,b) => b.bank.rawAmount - a.bank.rawAmount),
@@ -1757,26 +1929,25 @@ export default function App() {
         if (cashierRow.type !== b.type) return;
         const pairKey = `${cashierRow.id}-${b.id}`;
         if (rejectedPairs.has(pairKey) || savedKeys.has(pairKey)) return;
-        const sc = scoreCandidate(cashierRow, b, claimedNames);
+        const sc = scoreCandidate(cashierRow, b, claimedNames, nameAliases);
         if (!sc) return;
         const cur = map.get(b.id);
         if (!cur || sc.score > cur.score) map.set(b.id, { cashierId: cashierRow.id, score: sc.score });
       });
     });
     return map;
-  }, [uCashierRows, unmatchedBankForSuggestions, rejectedPairs, savedKeys, claimedNames]);
-
+  }, [uCashierRows, unmatchedBankForSuggestions, rejectedPairs, savedKeys, claimedNames, nameAliases]);
 
   const rerun = useCallback(() => {
     if (!activeBank.length || !activeCashier.length) return;
-    const res = reconcile(activeBank, activeCashier, manualGroups, savedMatches, rejectedPairs, visaCashierIds, amountTolerancePercent);
+    const res = reconcile(activeBank, activeCashier, manualGroups, savedMatches, rejectedPairs, visaCashierIds, jawwalPayCashierIds, mahmoudWalletCashierIds, amountTolerancePercent, nameAliases);
     setResults(res);
-  }, [activeBank, activeCashier, manualGroups, savedMatches, rejectedPairs, visaCashierIds, amountTolerancePercent]);
+  }, [activeBank, activeCashier, manualGroups, savedMatches, rejectedPairs, visaCashierIds, jawwalPayCashierIds, mahmoudWalletCashierIds, amountTolerancePercent, nameAliases]);
 
   const run = async() => {
     setLoading(true); setError(null);
     try {
-      const res = reconcile(activeBank, activeCashier, manualGroups, savedMatches, rejectedPairs, visaCashierIds, amountTolerancePercent);
+      const res = reconcile(activeBank, activeCashier, manualGroups, savedMatches, rejectedPairs, visaCashierIds, jawwalPayCashierIds, mahmoudWalletCashierIds, amountTolerancePercent, nameAliases);
       setResults(res);
       setTab("saved");
       setToast(`تمت مطابقة ${res.filter(r => r.type === "pending" || r.type === "saved").length} سجل`);
@@ -1784,35 +1955,27 @@ export default function App() {
     finally{setLoading(false);}
   };
 
-  // ─── نقل عنصر للفيزا ──────────────────────────────────────────────────────
-  // أي فاتورة كاشير (من أي مكان: منتظرة، غير متطابقة، مؤكدة) ممكن تنقل للفيزا
-  // شرط: الاسم يحتوي على رقم من 4 أرقام (مع / أو -) أو يُنقل يدوياً
   const handleMoveToVisa = (cashierRow: CashierRow, source?: "pending" | "unmatched" | "saved" | "manual") => {
     const visaNum = extractVisaNumber(cashierRow.rawName);
     if (!visaNum) {
-      alert(`هذه الفاتورة لا تحتوي على رقم فيزا (4 أرقام بعد / أو -).\nالاسم: ${cashierRow.rawName}\nلا يمكن نقلها للفيزا تلقائياً. تأكد إن الاسم فيه نمط مثل: احمد دحلان/9118 أو احمد دحلان-9118`);
+      setToast("هذه الفاتورة لا تحتوي على رقم فيزا من 4 أرقام بعد / أو -.");
+      return;
+    }
+    if (visaItems.some(v => v.cashierId === cashierRow.id)) {
+      setToast("هذه الفاتورة موجودة بالفعل في قائمة الفيزا.");
       return;
     }
     const cleanName = extractVisaName(cashierRow.rawName);
     const item: VisaItem = {
-      id: `visa-${Date.now()}-${cashierRow.id}`,
-      cashierId: cashierRow.id,
-      rawName: cashierRow.rawName,
-      name: cleanName,
-      visaNumber: visaNum,
-      amount: cashierRow.amount,
-      type: cashierRow.type,
-      date: cashierRow.date,
-      movedAt: new Date().toLocaleString("ar-SA"),
-      source
+      id: `visa-${Date.now()}-${cashierRow.id}`, cashierId: cashierRow.id,
+      rawName: cashierRow.rawName, name: cleanName, visaNumber: visaNum,
+      amount: cashierRow.amount, type: cashierRow.type, date: cashierRow.date,
+      movedAt: new Date().toLocaleString("ar-SA"), source
     };
     setVisaItems(prev => [...prev, item]);
-
-    // إذا كانت مؤكدة (saved)، نحذفها من savedMatches
     if (source === "saved") {
       setSavedMatches(prev => prev.filter(s => s.cashierId !== cashierRow.id));
     }
-
     setExpandedMatchKey(null);
     setExpandedUnmatchedCashier(null);
   };
@@ -1821,9 +1984,19 @@ export default function App() {
     setVisaItems(prev => prev.filter(v => v.id !== id));
   };
 
+  const handleRejectSpecialCashier = (cashierRow: CashierRow) => {
+    setRejectedSpecialCashierIds(prev => {
+      const next = new Set(prev);
+      next.add(cashierRow.id);
+      return next;
+    });
+    setToast("تم رفض التصنيف وإرجاع الفاتورة إلى المطابقة.");
+  };
+
   const handleSaveMatch = (cashierRow: CashierRow, bankRow: BankRow, note?: string) => {
     const pairKey = `${cashierRow.id}-${bankRow.id}`;
     if (savedKeys.has(pairKey)) return;
+    skipNextAutoReconcile.current = true;
 
     const isAmountDiff = Math.abs(bankRow.rawAmount - cashierRow.amount) > 0.01;
     const ms = advancedMatchCheck(cashierRow.name, bankRow.description);
@@ -1838,30 +2011,39 @@ export default function App() {
 
     const newSaved: SavedMatch = {
       id: `saved-${Date.now()}-${cashierRow.id}-${bankRow.id}`,
-      cashierId: cashierRow.id,
-      bankId: bankRow.id,
-      cashierName: cashierRow.name,
-      bankDesc: bankRow.description,
-      amount: bankRow.rawAmount,
-      type: cashierRow.type,
+      cashierId: cashierRow.id, bankId: bankRow.id,
+      cashierName: cashierRow.name, bankDesc: bankRow.description,
+      amount: bankRow.rawAmount, type: cashierRow.type,
       date: new Date().toLocaleDateString("ar-SA"),
       savedAt: new Date().toLocaleString("ar-SA"),
-      note: autoNote,
-      isAmountDiff,
-      isNameDiff,
-      isManual: false,
-      isAccountTypeDiff,
+      note: autoNote, isAmountDiff, isNameDiff, isManual: false, isAccountTypeDiff,
       matchScore: Math.round(nameSim(cashierRow.name, bankRow.description) * 100),
       editorNotes: note,
-      bankAccountType: bankRow.accountType,
-      cashierAccountType: cashierRow.accountType
+      bankAccountType: bankRow.accountType, cashierAccountType: cashierRow.accountType
     };
 
     setSavedMatches(prev => [...prev, newSaved]);
+    setResults(prev => prev
+      ? prev
+        .filter(result => result.type !== "pending" || (result.cashier.id === cashierRow.id && result.bank.id === bankRow.id))
+        .map(result => result.type === "pending" && result.cashier.id === cashierRow.id && result.bank.id === bankRow.id
+          ? { type: "saved", cashier: cashierRow, bank: bankRow, savedMatch: newSaved }
+          : result)
+      : prev);
+    if (isNameDiff) {
+      setNameAliases(prev => ({ ...prev, [smartNameKey(cashierRow.name)]: smartNameKey(smartAliasTarget(cashierRow.name, bankRow.description)) }));
+    }
     const nextRejected = new Set(rejectedPairs);
     nextRejected.delete(pairKey);
     setRejected(nextRejected);
     setExpandedMatchKey(null);
+    // Cross-tab sync: remove from advanced results
+    setAdvancedResults(prev => prev.filter(a => a.cashier.id !== cashierRow.id && a.bank.id !== bankRow.id));
+    setSelectedAdvancedKeys(prev => {
+      const n = new Set(prev);
+      for (const key of Array.from(n)) if (key.startsWith(`${cashierRow.id}-`) || key.endsWith(`-${bankRow.id}`)) n.delete(key);
+      return n;
+    });
   };
 
   const handleSaveMatchesBulk = (pairs: Array<{cashier: CashierRow; bank: BankRow}>) => {
@@ -1885,29 +2067,52 @@ export default function App() {
 
       newSaved.push({
         id: `saved-${Date.now()}-${cashierRow.id}-${bankRow.id}`,
-        cashierId: cashierRow.id,
-        bankId: bankRow.id,
-        cashierName: cashierRow.name,
-        bankDesc: bankRow.description,
-        amount: bankRow.rawAmount,
-        type: cashierRow.type,
+        cashierId: cashierRow.id, bankId: bankRow.id,
+        cashierName: cashierRow.name, bankDesc: bankRow.description,
+        amount: bankRow.rawAmount, type: cashierRow.type,
         date: new Date().toLocaleDateString("ar-SA"),
         savedAt: new Date().toLocaleString("ar-SA"),
-        note: autoNote,
-        isAmountDiff,
-        isNameDiff,
-        isManual: false,
-        isAccountTypeDiff,
+        note: autoNote, isAmountDiff, isNameDiff, isManual: false, isAccountTypeDiff,
         matchScore: Math.round(nameSim(cashierRow.name, bankRow.description) * 100),
         editorNotes: undefined,
-        bankAccountType: bankRow.accountType,
-        cashierAccountType: cashierRow.accountType
+        bankAccountType: bankRow.accountType, cashierAccountType: cashierRow.accountType
       });
     });
     if (!newSaved.length) return;
+    skipNextAutoReconcile.current = true;
     setSavedMatches(prev => [...prev, ...newSaved]);
-      setToast(`تم تأكيد ${newSaved.length} مطابقة`);
+    const savedPairKeys = new Set(newSaved.map(s => `${s.cashierId}-${s.bankId}`));
+    const savedCashierIdsNow = new Set(newSaved.map(s => s.cashierId));
+    const savedBankIdsNow = new Set(newSaved.map(s => s.bankId));
+    setResults(prev => prev
+      ? prev
+        .filter(result => result.type !== "pending" || savedPairKeys.has(`${result.cashier.id}-${result.bank.id}`))
+        .map(result => {
+          if (result.type !== "pending") return result;
+          const saved = newSaved.find(item => item.cashierId === result.cashier.id && item.bankId === result.bank.id);
+          return saved ? { type: "saved", cashier: result.cashier, bank: result.bank, savedMatch: saved } : result;
+        })
+      : prev);
+    const aliasUpdates: Record<string, string> = {};
+    pairs.forEach(({ cashier, bank }) => {
+      const ms = advancedMatchCheck(cashier.name, bank.description);
+      if (ms.isApprox || ms.matchType === "none") {
+        aliasUpdates[smartNameKey(cashier.name)] = smartNameKey(smartAliasTarget(cashier.name, bank.description));
+      }
+    });
+    if (Object.keys(aliasUpdates).length) setNameAliases(prev => ({ ...prev, ...aliasUpdates }));
+    setToast(`تم تأكيد ${newSaved.length} مطابقة`);
     setSelectedPendingKeys(new Set());
+    // Cross-tab sync: remove saved pairs from advanced results
+    setAdvancedResults(prev => prev.filter(a => !savedCashierIdsNow.has(a.cashier.id) && !savedBankIdsNow.has(a.bank.id)));
+    setSelectedAdvancedKeys(prev => {
+      const n = new Set(prev);
+      for (const key of Array.from(n)) {
+        const [cashierId, bankId] = key.split("-").map(Number);
+        if (savedCashierIdsNow.has(cashierId) || savedBankIdsNow.has(bankId)) n.delete(key);
+      }
+      return n;
+    });
   };
 
   const handleUnsaveMatch = (savedMatch: SavedMatch) => {
@@ -1928,6 +2133,8 @@ export default function App() {
     setExpandedMatchKey(null);
     setSavedMatches(prev => prev.filter(s => `${s.cashierId}-${s.bankId}` !== pairKey));
     setSelectedPendingKeys(prev => { const n = new Set(prev); n.delete(pairKey); return n; });
+    setAdvancedResults(prev => prev.filter(a => !(a.cashier.id === cashierRow.id && a.bank.id === bankRow.id)));
+    setSelectedAdvancedKeys(prev => { const n = new Set(prev); n.delete(pairKey); return n; });
   };
 
   const handleReplaceBank = (cashierRow: CashierRow, oldBank: BankRow, newBank: BankRow) => {
@@ -1938,13 +2145,11 @@ export default function App() {
     next.delete(newPairKey);
     setRejected(next);
     handleSaveMatch(cashierRow, newBank);
-    setDrawerOpen(false);
-    setDrawerCashier(null);
-    setDrawerOldBank(null);
+    closeDrawer();
   };
 
   const drawerBanks = useMemo(() => {
-    if (!drawerCashier) return [];
+    if (drawerMode !== "bank" || !drawerCashier) return [];
     return activeBank
       .filter(b => {
         if (b.type !== drawerCashier.type) return false;
@@ -1965,15 +2170,45 @@ export default function App() {
         return nameSim(drawerCashier.name, b.description) - nameSim(drawerCashier.name, a.description);
       })
       .slice(0, 50);
-  }, [drawerCashier, drawerNameSearch, drawerAmountFrom, drawerAmountTo, activeBank, savedBankIds, savedKeys, drawerOldBank, rejectedPairs]);
+  }, [drawerMode, drawerCashier, drawerNameSearch, drawerAmountFrom, drawerAmountTo, activeBank, savedBankIds, savedKeys, drawerOldBank]);
 
-  const openDrawer = (cashier: CashierRow, oldBank: BankRow) => {
+  const drawerCashiers = useMemo(() => {
+    if (drawerMode !== "cashier" || !drawerOldBank) return [];
+    return activeCashier
+      .filter(c => {
+        if (c.type !== drawerOldBank.type) return false;
+        if (visaCashierIds.has(c.id)) return false;
+        const pairKey = `${c.id}-${drawerOldBank.id}`;
+        if (savedCashierIds.has(c.id) && !savedKeys.has(pairKey)) return false;
+        if (c.id === drawerCashier?.id) return false;
+        const nameMatch = !drawerNameSearch.trim() ||
+          c.name.toLowerCase().includes(drawerNameSearch.trim().toLowerCase());
+        const amt = c.matchAmount;
+        const fromOk = !drawerAmountFrom || amt >= Number(drawerAmountFrom);
+        const toOk = !drawerAmountTo || amt <= Number(drawerAmountTo);
+        return nameMatch && fromOk && toOk;
+      })
+      .sort((a, b) => {
+        const diffA = Math.abs(a.matchAmount - drawerOldBank.rawAmount);
+        const diffB = Math.abs(b.matchAmount - drawerOldBank.rawAmount);
+        if (diffA !== diffB) return diffA - diffB;
+        return nameSim(drawerOldBank.description, b.name) - nameSim(drawerOldBank.description, a.name);
+      })
+      .slice(0, 50);
+  }, [drawerMode, drawerOldBank, drawerCashier, drawerNameSearch, drawerAmountFrom, drawerAmountTo, activeCashier, savedCashierIds, savedKeys, visaCashierIds]);
+
+  const openDrawer = (cashier: CashierRow, oldBank: BankRow, mode: "bank" | "cashier" = "bank") => {
+    setDrawerMode(mode);
     setDrawerCashier(cashier);
     setDrawerOldBank(oldBank);
     setDrawerNameSearch("");
     setDrawerAmountFrom("");
     setDrawerAmountTo("");
     setDrawerOpen(true);
+    const pairKey = `${cashier.id}-${oldBank.id}`;
+    window.setTimeout(() => {
+      pendingRowRefs.current[pairKey]?.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+    }, 50);
   };
 
   const closeDrawer = () => {
@@ -1983,13 +2218,38 @@ export default function App() {
     setDrawerNameSearch("");
     setDrawerAmountFrom("");
     setDrawerAmountTo("");
+    setDraggedItemId(null);
+    setDropTargetKey(null);
   };
+
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") closeDrawer(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [drawerOpen]);
 
   const handleDropBank = (cashier: CashierRow, oldBank: BankRow, newBankId: number) => {
     const newBank = activeBank.find(b => b.id === newBankId);
     if (!newBank) return;
     handleReplaceBank(cashier, oldBank, newBank);
-    setDropTargetKey(null);
+  };
+
+  const handleReplaceCashier = (bankRow: BankRow, oldCashier: CashierRow, newCashier: CashierRow) => {
+    const oldPairKey = `${oldCashier.id}-${bankRow.id}`;
+    const newPairKey = `${newCashier.id}-${bankRow.id}`;
+    const next = new Set(rejectedPairs);
+    next.add(oldPairKey);
+    next.delete(newPairKey);
+    setRejected(next);
+    handleSaveMatch(newCashier, bankRow);
+    closeDrawer();
+  };
+
+  const handleDropCashier = (bankRow: BankRow, oldCashier: CashierRow, newCashierId: number) => {
+    const newCashier = activeCashier.find(c => c.id === newCashierId);
+    if (!newCashier) return;
+    handleReplaceCashier(bankRow, oldCashier, newCashier);
   };
 
   const handleAcceptSuggestion = (cashierRow: CashierRow, bankRow: BankRow) => {
@@ -2013,28 +2273,46 @@ export default function App() {
         if (savedKeys.has(pairKey)) return;
         newSaved.push({
           id: `manual-${g.id}-${c.id}-${b.id}`,
-          cashierId: c.id,
-          bankId: b.id,
-          cashierName: c.name,
-          bankDesc: b.description,
-          amount: b.rawAmount,
-          type: c.type,
+          cashierId: c.id, bankId: b.id,
+          cashierName: c.name, bankDesc: b.description,
+          amount: b.rawAmount, type: c.type,
           date: new Date().toLocaleDateString("ar-SA"),
           savedAt: new Date().toLocaleString("ar-SA"),
           note: g.note || "مطابقة يدوية",
           isAmountDiff: Math.abs(b.rawAmount - c.amount) > 0.01,
-          isNameDiff: true,
-          isManual: true,
+          isNameDiff: true, isManual: true,
           isAccountTypeDiff: accountTypesDiffer(b.accountType, c.accountType),
-          bankAccountType: b.accountType,
-          cashierAccountType: c.accountType,
+          bankAccountType: b.accountType, cashierAccountType: c.accountType,
           sourceGroupId: g.id,
           matchScore: Math.round(nameSim(c.name, b.description) * 100)
         });
       });
     });
     setSavedMatches(prev => [...prev, ...newSaved]);
+    const groupPairKeys = new Set(newSaved.map(s => `${s.cashierId}-${s.bankId}`));
+    const groupCashierIds = new Set(newSaved.map(s => s.cashierId));
+    const groupBankIds = new Set(newSaved.map(s => s.bankId));
+    setResults(prev => prev
+      ? prev
+        .filter(result => result.type !== "pending" || groupPairKeys.has(`${result.cashier.id}-${result.bank.id}`))
+        .map(result => {
+          if (result.type !== "pending") return result;
+          const saved = newSaved.find(item => item.cashierId === result.cashier.id && item.bankId === result.bank.id);
+          return saved ? { type: "saved", cashier: result.cashier, bank: result.bank, savedMatch: saved } : result;
+        })
+      : prev);
     setManualGroups(prev => [...prev, g]);
+    // Cross-tab sync: remove from advanced results and pending selection
+    setAdvancedResults(prev => prev.filter(a => !groupCashierIds.has(a.cashier.id) && !groupBankIds.has(a.bank.id)));
+    setSelectedAdvancedKeys(prev => {
+      const n = new Set(prev);
+      for (const key of Array.from(n)) {
+        const [cashierId, bankId] = key.split("-").map(Number);
+        if (groupCashierIds.has(cashierId) || groupBankIds.has(bankId)) n.delete(key);
+      }
+      return n;
+    });
+    setSelectedPendingKeys(prev => { const n = new Set(prev); groupPairKeys.forEach(k => n.delete(k)); return n; });
   };
 
   const handleRemoveGroup = (id: string) => {
@@ -2042,36 +2320,41 @@ export default function App() {
     setManualGroups(prev => prev.filter(g => g.id !== id));
   };
 
-  // ─── تعليق عنصر ──────────────────────────────────────────────────────────
   const handleHoldCashier = (c: CashierRow, note?: string) => {
+    if (heldItems.some(h => h.kind === "cashier" && h.refId === c.id && h.fileSessionId === cashFileSessionId)) {
+      setToast("هذه الفاتورة موجودة بالفعل في المعلقات.");
+      return;
+    }
+    if ((c as any)._fromHeld) {
+      setReturnedHeldCashier(prev => prev.filter(x => x.id !== c.id));
+    }
     const item: HeldItem = {
-      id: `held-c-${Date.now()}-${c.id}`,
-      kind: "cashier",
-      refId: c.id,
-      fileSessionId: cashFileSessionId,
-      data: c,
-      heldAt: new Date().toLocaleString("ar-SA"),
-      note
+      id: `held-c-${Date.now()}-${c.id}`, kind: "cashier", refId: c.id,
+      fileSessionId: cashFileSessionId, data: c,
+      heldAt: new Date().toLocaleString("ar-SA"), note
     };
     setHeldItems(prev => [...prev, item]);
     setExpandedMatchKey(null);
     setExpandedUnmatchedCashier(null);
   };
   const handleHoldBank = (b: BankRow, note?: string) => {
+    if (heldItems.some(h => h.kind === "bank" && h.refId === b.id && h.fileSessionId === bankFileSessionId)) {
+      setToast("هذه الحوالة موجودة بالفعل في المعلقات.");
+      return;
+    }
+    if ((b as any)._fromHeld) {
+      setReturnedHeldBank(prev => prev.filter(x => x.id !== b.id));
+    }
     const item: HeldItem = {
-      id: `held-b-${Date.now()}-${b.id}`,
-      kind: "bank",
-      refId: b.id,
-      fileSessionId: bankFileSessionId,
-      data: b,
-      heldAt: new Date().toLocaleString("ar-SA"),
-      note
+      id: `held-b-${Date.now()}-${b.id}`, kind: "bank", refId: b.id,
+      fileSessionId: bankFileSessionId, data: b,
+      heldAt: new Date().toLocaleString("ar-SA"), note
     };
     setHeldItems(prev => [...prev, item]);
     setExpandedMatchKey(null);
   };
   const handleUnhold = (h: HeldItem) => {
-    const uniqueId = -(Date.now() % 1_000_000_000) - Math.floor(Math.random() * 1000) - 1;
+    const uniqueId = nextHeldRowId();
     if (h.kind === "bank") {
       const row: BankRow = { ...(h.data as BankRow), id: uniqueId, _fromHeld: true };
       setReturnedHeldBank(prev => [...prev, row]);
@@ -2086,13 +2369,16 @@ export default function App() {
     setHeldItems(prev => prev.filter(h => h.id !== id));
   };
 
-  // إعادة تشغيل المطابقة تلقائياً
   useEffect(() => {
+    if (skipNextAutoReconcile.current) {
+      skipNextAutoReconcile.current = false;
+      return;
+    }
     if (activeBank.length && activeCashier.length) {
       rerun();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [manualGroups, savedMatches, rejectedPairs, visaItems, heldItems, activeBank, activeCashier, amountTolerancePercent]);
+  }, [manualGroups, savedMatches, rejectedPairs, visaItems, jawwalPayCashierIds, mahmoudWalletCashierIds, rejectedSpecialCashierIds, heldItems, activeBank, activeCashier, amountTolerancePercent]);
 
   const stats = useMemo(() => {
     if (!results) return null;
@@ -2101,6 +2387,8 @@ export default function App() {
       pending: results.filter(r => r.type === "pending").length,
       manual: results.filter((r:any) => r.type === "saved" && (r.savedMatch as SavedMatch).isManual).length,
       visa: visaItems.length,
+      jawwalPay: results.filter(r => r.type === "jawwalPay").length,
+      mahmoudWallet: results.filter(r => r.type === "mahmoudWallet").length,
       held: heldItems.length,
       uCashier: results.filter(r => r.type === "unmatchedCashier").length,
       uBank: results.filter(r => r.type === "unmatchedBank").length,
@@ -2130,37 +2418,32 @@ export default function App() {
   const visibleUBankRows = uBankRows.filter(filterResult);
 
   useEffect(() => {
-    if (toast) return;
+    if (!toast) return;
     const timer = window.setTimeout(() => setToast(null), 2800);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
   useEffect(() => { setPendingPage(1); }, [resultSearch, resultType, minAmount, maxAmount]);
 
-  // ─── حفظ/تحميل المشروع كاملاً ─────────────────────────────────────────────
   const saveProject = async (name: string) => {
     const projects = await loadProjectsList();
     const project: SavedProject = {
-      id: `proj-${Date.now()}`,
-      name,
+      id: `proj-${Date.now()}`, name,
       savedAt: new Date().toLocaleString("ar-SA"),
       bankHeaders, bankRowsRaw, bankMap, bankSwap, bankFileSessionId,
       cashHeaders, cashRowsRaw, cashMap, cashSwap, cashFileSessionId,
       manualGroups, savedMatches,
       rejectedPairs: Array.from(rejectedPairs),
-      visaItems,
-      heldItems,
-      returnedHeldBank,
-      returnedHeldCashier
+      visaItems, heldItems, returnedHeldBank, returnedHeldCashier
     };
     await persistProjectsList([...projects, project]);
-    alert(`تم حفظ المشروع "${name}" ✓\nتقدر ترجع له لاحقاً من "المشاريع المحفوظة"`);
+    setToast(`تم حفظ المشروع "${name}" ✓`);
   };
 
   const loadProject = (p: SavedProject) => {
-    setBankH(p.bankHeaders); setBankRows(p.bankRowsRaw); setBankMap({ date: p.bankMap?.date ?? "", desc: p.bankMap?.desc ?? "", debit: p.bankMap?.debit ?? "", credit: p.bankMap?.credit ?? "", accountType: p.bankMap?.accountType ?? "" }); setBankSwap(p.bankSwap ?? false);
+    setBankH(p.bankHeaders); setBankRows(p.bankRowsRaw); setBankMap({ date: p.bankMap?.date ?? "", desc: p.bankMap?.desc ?? "", debit: p.bankMap?.debit ?? "", credit: p.bankMap?.credit ?? "", accountType: p.bankMap?.accountType ?? "", ref: (p.bankMap as any)?.ref ?? "" }); setBankSwap(p.bankSwap ?? false);
     setBankFileSessionId(p.bankFileSessionId ?? 0);
-    setCashH(p.cashHeaders); setCashRows(p.cashRowsRaw); setCashMap({ date: p.cashMap?.date ?? "", name: p.cashMap?.name ?? "", debit: p.cashMap?.debit ?? "", credit: p.cashMap?.credit ?? "", accountType: p.cashMap?.accountType ?? "" }); setCashSwap(p.cashSwap ?? false);
+    setCashH(p.cashHeaders); setCashRows(p.cashRowsRaw); setCashMap({ date: p.cashMap?.date ?? "", name: p.cashMap?.name ?? "", debit: p.cashMap?.debit ?? "", credit: p.cashMap?.credit ?? "", accountType: p.cashMap?.accountType ?? "", ref: (p.cashMap as any)?.ref ?? "" }); setCashSwap(p.cashSwap ?? false);
     setCashFileSessionId(p.cashFileSessionId ?? 0);
     setManualGroups(p.manualGroups); setSavedMatches(p.savedMatches);
     setRejected(new Set(p.rejectedPairs));
@@ -2177,7 +2460,6 @@ export default function App() {
     await persistProjectsList(projects);
   };
 
-  // ─── حذف المحفوظات ──────────────────────────────────────────────────────────
   const handleClearSavedMatches = () => {
     if (!savedMatches.length) return;
     if (!window.confirm(`مسح جميع المطابقات المؤكدة (${savedMatches.length})؟`)) return;
@@ -2187,11 +2469,12 @@ export default function App() {
 
   const handleClearSession = () => {
     if (!window.confirm("مسح الجلسة الحالية كاملة؟\nهاد بيحذف: الملفات، المطابقات، الفيزا، المعلقات، والرفوض.\nالمشاريع المحفوظة رح تضل محفوظة.")) return;
-    setBankH([]); setBankRows([]); setBankMap({date:"",desc:"",debit:"",credit:"",accountType:""}); setBankSwap(false); setBankFile(null); setBankFileSessionId(0);
-    setCashH([]); setCashRows([]); setCashMap({date:"",name:"",debit:"",credit:"",accountType:""}); setCashSwap(false); setCashFile(null); setCashFileSessionId(0);
+    setBankH([]); setBankRows([]); setBankMap({date:"",desc:"",debit:"",credit:"",accountType:"",ref:""}); setBankSwap(false); setBankFile(null); setBankFileSessionId(0);
+    setCashH([]); setCashRows([]); setCashMap({date:"",name:"",debit:"",credit:"",accountType:"",ref:""}); setCashSwap(false); setCashFile(null); setCashFileSessionId(0);
     setManualGroups([]); setSavedMatches([]); setRejected(new Set());
     setVisaItems([]); setHeldItems([]); setReturnedHeldBank([]); setReturnedHeldCashier([]);
-    setResults(null); setTab("saved");
+    setRejectedSpecialCashierIds(new Set());
+    setResults(null); setTab("saved"); setAdvancedResults([]);
     setSessionRestoredNotice(false);
     storageDelete("current_session");
     setShowDeleteMenu(false);
@@ -2205,7 +2488,6 @@ export default function App() {
     setShowDeleteMenu(false);
   };
 
-  // ─── استكمال العمل من ملف إكسل مُصدَّر سابقاً ────────────────────────────────
   const buildResumeData = (): ResumeData => ({
     bankHeaders, bankRowsRaw, bankMap, bankSwap, bankFileSessionId,
     cashHeaders, cashRowsRaw, cashMap, cashSwap, cashFileSessionId,
@@ -2216,10 +2498,10 @@ export default function App() {
 
   const loadResumeData = (p: ResumeData) => {
     setBankH(p.bankHeaders || []); setBankRows(p.bankRowsRaw || []);
-    setBankMap({ date: p.bankMap?.date ?? "", desc: p.bankMap?.desc ?? "", debit: p.bankMap?.debit ?? "", credit: p.bankMap?.credit ?? "", accountType: p.bankMap?.accountType ?? "" }); setBankSwap(!!p.bankSwap);
+    setBankMap({ date: p.bankMap?.date ?? "", desc: p.bankMap?.desc ?? "", debit: p.bankMap?.debit ?? "", credit: p.bankMap?.credit ?? "", accountType: p.bankMap?.accountType ?? "", ref: (p.bankMap as any)?.ref ?? "" }); setBankSwap(!!p.bankSwap);
     setBankFileSessionId(p.bankFileSessionId ?? 0);
     setCashH(p.cashHeaders || []); setCashRows(p.cashRowsRaw || []);
-    setCashMap({ date: p.cashMap?.date ?? "", name: p.cashMap?.name ?? "", debit: p.cashMap?.debit ?? "", credit: p.cashMap?.credit ?? "", accountType: p.cashMap?.accountType ?? "" }); setCashSwap(!!p.cashSwap);
+    setCashMap({ date: p.cashMap?.date ?? "", name: p.cashMap?.name ?? "", debit: p.cashMap?.debit ?? "", credit: p.cashMap?.credit ?? "", accountType: p.cashMap?.accountType ?? "", ref: (p.cashMap as any)?.ref ?? "" }); setCashSwap(!!p.cashSwap);
     setCashFileSessionId(p.cashFileSessionId ?? 0);
     setManualGroups(p.manualGroups || []); setSavedMatches(p.savedMatches || []);
     setRejected(new Set(p.rejectedPairs || []));
@@ -2239,22 +2521,22 @@ export default function App() {
       return;
     }
     loadResumeData(data);
-    alert("تم استرجاع كل شغلك من الملف ✓ — تقدر تكمل عليه أو تعدّل عادي.");
+    setToast("تم استرجاع كل شغلك من الملف ✓");
   };
 
   if (page === "manual") {
-    const excludedCashierIds = new Set([...savedCashierIds, ...pendingCashierIds, ...visaCashierIds]);
-    const excludedBankIds = new Set([...savedBankIds, ...pendingBankIds]);
+    const manualCashierRows = activeCashier.filter(c => !visaCashierIds.has(c.id) && !specialCashierIds.has(c.id));
+    const manualBankRows = activeBank;
     return (
       <ManualWorkbench
-        bankRows={activeBank}
-        cashierRows={activeCashier.filter(c => !visaCashierIds.has(c.id))}
+        bankRows={manualBankRows}
+        cashierRows={manualCashierRows}
         manualGroups={manualGroups}
         onAddGroup={handleAddGroup}
         onRemoveGroup={handleRemoveGroup}
         onBack={() => setPage("main")}
-        savedCashierIds={excludedCashierIds}
-        savedBankIds={excludedBankIds}
+        savedCashierIds={savedCashierIds}
+        savedBankIds={savedBankIds}
         onHoldBank={handleHoldBank}
         onHoldCashier={handleHoldCashier}
       />
@@ -2277,11 +2559,46 @@ export default function App() {
   }
 
   if (page === "recon2") {
-    return <Reconciliation2 onBack={() => setPage("main")} />;
+    return <Reconciliation2 onBack={() => { setMainMode("default"); setPage("main"); }} onStageBToMain={() => { setMainMode("stageB"); setPage("main"); }} onStageAToMain={results => {
+      setStageAInvoices(results.filter(result => result.matched && result.category !== "فيزا"));
+      setPage("main");
+    }} />;
+  }
+  if (page === "recon2StageA") {
+    return <Reconciliation2 initialStage="stageA" onBack={() => { setMainMode("default"); setPage("main"); }} onStageBToMain={() => { setMainMode("stageB"); setPage("main"); }} onStageAToMain={results => {
+      setStageAInvoices(results.filter(result => result.matched && result.category !== "فيزا"));
+      setPage("main");
+    }} />;
+  }
+  if (page === "recon2Visa") {
+    const visaInvoices: StageAResult[] = visaItems.map(item => ({
+      id: item.cashierId,
+      source: "المنصة الرئيسية",
+      name: item.name,
+      originalName: item.rawName,
+      amount: item.amount,
+      databaseName: "",
+      databaseAmount: 0,
+      userId: "",
+      registrationTime: item.date,
+      customerNumber: "",
+      invoiceNumber: item.visaNumber,
+      accountType: "",
+      invoice: { ...item },
+      matched: true,
+      issue: item.note || "",
+      category: "فيزا",
+      categoryIssue: ""
+    }));
+    return <Reconciliation2 initialStage="stageC" visaInvoices={visaInvoices} onBack={() => setPage("main")} />;
   }
 
   const togglePendingSelect = (key: string) => {
-    setSelectedPendingKeys(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
+    setSelectedPendingKeys(prev => {
+      const n = new Set(prev);
+      if (n.has(key)) n.delete(key); else n.add(key);
+      return n;
+    });
   };
   const allPendingSelected = pendingRows.length > 0 && pendingRows.every((r:any) => selectedPendingKeys.has(`${r.cashier.id}-${r.bank.id}`));
   const togglePendingSelectAll = () => {
@@ -2296,33 +2613,34 @@ export default function App() {
   };
 
   const handleRetryMatch = () => {
-    const remainingCashiers = uCashierRows.map((r:any) => r.cashier as CashierRow);
-    const remainingBanks = uBankRows.map((r:any) => r.bank as BankRow);
-    if (!remainingCashiers.length || !remainingBanks.length) {
-      alert("ما في فواتير أو حوالات متبقية لإعادة المطابقة عليها.");
+    if (!pendingRows.length) {
+      setToast("ما في مطابقات منتظرة لإعادة فرزها.");
       return;
     }
-    const { simplePairs, bundles } = retryMatchRemaining(remainingCashiers, remainingBanks, 2);
-    const bundledCount = bundles.reduce((s, g) => s + g.cashiers.length + g.banks.length, 0);
-    if (!simplePairs.length && !bundles.length) {
-      alert("ما لقينا مطابقات جديدة إضافية بهذه الجولة. الباقي فعلاً محتاج مراجعة يدوية.");
-      return;
-    }
-    const msg = [
-      simplePairs.length ? `${simplePairs.length} مطابقة اسم (بفرق مبلغ بسيط لو موجود)` : null,
-      bundles.length ? `${bundles.length} مجموعة تجميع (${bundledCount} عنصر)` : null,
-    ].filter(Boolean).join(" و ");
-    if (!window.confirm(`لقينا: ${msg}.\nنحفظهم كمطابقات مؤكدة الآن؟`)) return;
 
-    simplePairs.forEach(({ cashier, bank }) => handleSaveMatch(cashier, bank));
-    bundles.forEach((g, i) => {
-      handleAddGroup({
-        id: `retry-${Date.now()}-${i}`,
-        banks: g.banks,
-        cashiers: g.cashiers,
-        note: "مطابقة تلقائية بإعادة الفرز"
+    if (!window.confirm(
+      `إعادة فرز دقيقة لـ ${pendingRows.length} مطابقة منتظرة.\n` +
+      `رح نفك كل الروابط الحالية ونعيد المطابقة من الصفر بسعر تنافسي لكل فاتورة وحوالة.\n` +
+      `النتيجة بتضل بقائمة "منتظر" — ما رح تنتقل للمؤكدة إلا إذا ضغطتي حفظ.`
+    )) return;
+
+    const pendingCashierIds = new Set(pendingRows.map((r:any) => r.cashier.id as number));
+    const pendingBankIds = new Set(pendingRows.map((r:any) => r.bank.id as number));
+
+    setRejected(prev => {
+      const next = new Set<string>();
+      prev.forEach(key => {
+        const [cidStr, bidStr] = key.split("-");
+        const cid = parseInt(cidStr);
+        const bid = parseInt(bidStr);
+        if (!pendingCashierIds.has(cid) && !pendingBankIds.has(bid)) {
+          next.add(key);
+        }
       });
+      return next;
     });
+
+    setToast(`تمت إعادة الفرز التنافسي لـ ${pendingRows.length} مطابقة منتظرة`);
   };
 
   const handleMoveToManual = (pairs: Array<{ cashier: CashierRow; bank: BankRow }>) => {
@@ -2347,18 +2665,42 @@ export default function App() {
     handleMoveToManual(pendingRows.map((r:any) => ({ cashier: r.cashier as CashierRow, bank: r.bank as BankRow })));
   };
 
+  const toggleAdvancedSelect = (key: string) => {
+    setSelectedAdvancedKeys(prev => {
+      const n = new Set(prev);
+      if (n.has(key)) n.delete(key); else n.add(key);
+      return n;
+    });
+  };
+  const allAdvancedSelected = advancedResults.length > 0 && advancedResults.every(a => selectedAdvancedKeys.has(`${a.cashier.id}-${a.bank.id}`));
+  const toggleAdvancedSelectAll = () => {
+    if (allAdvancedSelected) { setSelectedAdvancedKeys(new Set()); return; }
+    setSelectedAdvancedKeys(new Set(advancedResults.map(a => `${a.cashier.id}-${a.bank.id}`)));
+  };
+  const handleSaveSelectedAdvanced = () => {
+    const pairs = advancedResults
+      .filter(a => selectedAdvancedKeys.has(`${a.cashier.id}-${a.bank.id}`))
+      .map(a => ({ cashier: a.cashier, bank: a.bank }));
+    handleSaveMatchesBulk(pairs);
+  };
+
   return (
     <div dir="rtl" className="min-h-screen bg-background text-foreground p-6">
       <div className="max-w-6xl mx-auto space-y-5">
 
         {toast && <div className="fixed bottom-5 left-5 z-50 flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-3 text-sm text-white shadow-xl"><Check className="h-4 w-4 text-green-300" />{toast}</div>}
 
-        {/* Header */}
         <div className="flex flex-wrap items-center gap-3 justify-between">
           <div><h1 className="text-xl font-bold">منصة التسوية الذكية</h1><p className="mt-1 text-xs text-muted-foreground">مراجعة مالية أسرع، بقرارات قابلة للتتبع</p></div>
           <div className="flex items-center gap-2 flex-wrap">
-            <button onClick={() => setTab("pending")} className="rounded-lg border bg-white px-3 py-2 text-xs font-medium hover:bg-slate-50">Stage A · آلي</button>
-            <button onClick={() => setPage("assist")} className="rounded-lg border bg-white px-3 py-2 text-xs font-medium hover:bg-slate-50">Stage B · مراجعة</button>
+          {mainMode === "stageB" && <button onClick={() => { setMainMode("default"); setPage("recon2"); }}
+            className="flex items-center gap-2 rounded-lg bg-teal-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-teal-700">
+            <CreditCard className="h-4 w-4"/>العودة إلى منصة التسوية والمراحل
+          </button>}
+          {mainMode === "default" && <>
+              <button onClick={() => setPage("recon2StageA")} className="rounded-lg border bg-white px-3 py-2 text-xs font-medium hover:bg-slate-50">Stage A · آلي</button>
+              <button onClick={() => setPage("assist")} className="rounded-lg border bg-white px-3 py-2 text-xs font-medium hover:bg-slate-50">Stage B · مراجعة</button>
+            </>}
             <button onClick={() => setShowSettings(v => !v)} className="rounded-lg border bg-white px-3 py-2 text-xs font-medium hover:bg-slate-50">الإعدادات</button>
             <ProjectsBar onSave={saveProject} onLoad={loadProject} onDelete={deleteProject} />
             <button onClick={() => setPage("assist")}
@@ -2369,10 +2711,10 @@ export default function App() {
               className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 transition-colors">
               <Save className="w-4 h-4"/>المطابقة اليدوية (تؤكد فوراً)
             </button>
-            <button onClick={() => setPage("recon2")}
+            {mainMode === "default" && <button onClick={() => setPage("recon2")}
               className="flex items-center gap-2 px-4 py-2 bg-teal-600 text-white rounded-lg text-sm font-medium hover:bg-teal-700 transition-colors">
-              <CreditCard className="w-4 h-4"/>منصة تسوية 2 (الفيزا)
-            </button>
+              <CreditCard className="w-4 h-4"/>منصة التسوية والمراحل
+            </button>}
             <div className="relative">
               <button onClick={() => setShowDeleteMenu(v => !v)}
                 className="px-3 py-2 bg-red-50 text-red-600 border border-red-200 rounded-lg text-xs flex items-center gap-1 hover:bg-red-100 transition-colors">
@@ -2406,7 +2748,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Session restored notice */}
         {sessionRestoredNotice && (
           <div className="flex items-center gap-3 bg-green-50 border border-green-200 rounded-xl px-4 py-3">
             <Shield className="w-5 h-5 text-green-600 shrink-0"/>
@@ -2419,16 +2760,16 @@ export default function App() {
           </div>
         )}
 
-        {/* Visa banner */}
         {visaItems.length > 0 && (
           <div className="flex items-start gap-3 bg-teal-50 border border-teal-200 rounded-xl px-4 py-3">
             <CreditCard className="w-5 h-5 text-teal-600 shrink-0 mt-0.5"/>
             <div className="flex-1">
-              <p className="text-sm font-semibold text-teal-800">
-                {visaItems.length} عنصر منقول للفيزا
-              </p>
+              <p className="text-sm font-semibold text-teal-800">{visaItems.length} عنصر منقول للفيزا</p>
               <p className="text-xs text-teal-600 mt-0.5">اضغط على تبويب "💳 الفيزا" بالأسفل لمراجعتها</p>
             </div>
+            <button onClick={() => setPage("recon2Visa")} className="shrink-0 rounded-lg bg-teal-600 px-3 py-2 text-xs font-medium text-white hover:bg-teal-700">
+              ترحيل على C
+            </button>
           </div>
         )}
 
@@ -2438,15 +2779,14 @@ export default function App() {
           <div className="flex flex-wrap items-center gap-3">
             <div><p className="text-sm font-semibold">إعدادات المطابقة</p><p className="text-xs text-muted-foreground">تسامح رسوم التحويل يطبق على المبلغ النسبي</p></div>
             <label className="mr-auto flex items-center gap-2 text-xs">نسبة التسامح
-              <input type="number" min="0" max="10" step="0.1" value={amountTolerancePercent} onChange={e => setAmountTolerancePercent(Number(e.target.value) || 0)} className="w-20 rounded-lg border bg-white px-2 py-1.5 text-center" />%
+              <input type="number" min="0" max="10" step="0.1" value={amountTolerancePercent} onChange={e => setAmountTolerancePercent(Math.min(10, Math.max(0, Number(e.target.value) || 0)))} className="w-20 rounded-lg border bg-white px-2 py-1.5 text-center" />%
             </label>
           </div>
         </div>}
 
-        {/* File upload */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
           <div className="bg-card border p-4 rounded-xl space-y-4">
-            <h2 className="font-semibold text-sm">🏦 كشف البنك</h2>
+            <h2 className="font-semibold text-sm">🏦 كشف حوالات بنك فلسطين</h2>
             <DropZone file={bankFile} onFile={loadBank} onClear={() => { setBankFile(null); setBankH([]); setBankRows([]); setResults(null); }} />
             {bankHeaders.length > 0 && (
               <div className="grid grid-cols-2 gap-2">
@@ -2455,6 +2795,7 @@ export default function App() {
                 <Sel label="المبالغ المدفوعة (Debit)" headers={bankHeaders} value={bankMap.debit} onChange={v => setBankMap(m => ({ ...m, debit: v }))} />
                 <Sel label="المبالغ المستلمة (Credit)" headers={bankHeaders} value={bankMap.credit} onChange={v => setBankMap(m => ({ ...m, credit: v }))} />
                 <Sel label="نوع الحساب (بنك فلسطين / محفظة...)" headers={bankHeaders} value={bankMap.accountType} onChange={v => setBankMap(m => ({ ...m, accountType: v }))} />
+                <Sel label="رقم المرجع / الحوالة" headers={bankHeaders} value={bankMap.ref} onChange={v => setBankMap(m => ({ ...m, ref: v }))} />
               </div>
             )}
             {bankHeaders.length > 0 && (
@@ -2464,8 +2805,8 @@ export default function App() {
               </label>
             )}
           </div>
-          <div className="bg-card border p-4 rounded-xl space-y-4">
-            <h2 className="font-semibold text-sm">💼 كشف الكاشير</h2>
+          {!stageAInvoices.length && <div className="bg-card border p-4 rounded-xl space-y-4">
+            <h2 className="font-semibold text-sm">🧾 كشف فواتير بنك فلسطين</h2>
             <DropZone file={cashFile} onFile={loadCash} onClear={() => { setCashFile(null); setCashH([]); setCashRows([]); setResults(null); }} />
             {cashHeaders.length > 0 && (
               <div className="grid grid-cols-2 gap-2">
@@ -2474,6 +2815,7 @@ export default function App() {
                 <Sel label="المبالغ المدفوعة (Debit)" headers={cashHeaders} value={cashMap.debit} onChange={v => setCashMap(m => ({ ...m, debit: v }))} />
                 <Sel label="المبالغ المستلمة (Credit)" headers={cashHeaders} value={cashMap.credit} onChange={v => setCashMap(m => ({ ...m, credit: v }))} />
                 <Sel label="نوع الحساب (بنك فلسطين / محفظة...)" headers={cashHeaders} value={cashMap.accountType} onChange={v => setCashMap(m => ({ ...m, accountType: v }))} />
+                <Sel label="رقم المرجع / الحوالة" headers={cashHeaders} value={cashMap.ref} onChange={v => setCashMap(m => ({ ...m, ref: v }))} />
               </div>
             )}
             {cashHeaders.length > 0 && (
@@ -2482,19 +2824,50 @@ export default function App() {
                 عكس المدين/الدائن (إذا جاءت الأنواع مقلوبة)
               </label>
             )}
+          </div>}
+          <div className="bg-card border p-4 rounded-xl space-y-4">
+            <h2 className="font-semibold text-sm">💳 كشف حوالات محفظة تجارية</h2>
+            <DropZone file={walletBankFile} onFile={loadWalletBank} onClear={() => { setWalletBankFile(null); setWalletBankHeaders([]); setWalletBankRows([]); setResults(null); }} />
+            {walletBankHeaders.length > 0 && <div className="grid grid-cols-2 gap-2">
+              <Sel label="التاريخ" headers={walletBankHeaders} value={walletBankMap.date} onChange={v => setWalletBankMap(m => ({ ...m, date:v }))} />
+              <Sel label="الإيضاحات / البيان" headers={walletBankHeaders} value={walletBankMap.desc} onChange={v => setWalletBankMap(m => ({ ...m, desc:v }))} />
+              <Sel label="المبالغ المدفوعة" headers={walletBankHeaders} value={walletBankMap.debit} onChange={v => setWalletBankMap(m => ({ ...m, debit:v }))} />
+              <Sel label="المبالغ المستلمة" headers={walletBankHeaders} value={walletBankMap.credit} onChange={v => setWalletBankMap(m => ({ ...m, credit:v }))} />
+              <Sel label="رقم المرجع / الحوالة" headers={walletBankHeaders} value={walletBankMap.ref} onChange={v => setWalletBankMap(m => ({ ...m, ref:v }))} />
+            </div>}
           </div>
+          {!stageAInvoices.length && <div className="bg-card border p-4 rounded-xl space-y-4">
+            <h2 className="font-semibold text-sm">🧾 كشف فواتير محفظة تجارية</h2>
+            <DropZone file={walletCashFile} onFile={loadWalletCash} onClear={() => { setWalletCashFile(null); setWalletCashHeaders([]); setWalletCashRows([]); setResults(null); }} />
+            {walletCashHeaders.length > 0 && <div className="grid grid-cols-2 gap-2">
+              <Sel label="التاريخ" headers={walletCashHeaders} value={walletCashMap.date} onChange={v => setWalletCashMap(m => ({ ...m, date:v }))} />
+              <Sel label="البيان" headers={walletCashHeaders} value={walletCashMap.name} onChange={v => setWalletCashMap(m => ({ ...m, name:v }))} />
+              <Sel label="المبالغ المدفوعة" headers={walletCashHeaders} value={walletCashMap.debit} onChange={v => setWalletCashMap(m => ({ ...m, debit:v }))} />
+              <Sel label="المبالغ المستلمة" headers={walletCashHeaders} value={walletCashMap.credit} onChange={v => setWalletCashMap(m => ({ ...m, credit:v }))} />
+              <Sel label="رقم المرجع / الحوالة" headers={walletCashHeaders} value={walletCashMap.ref} onChange={v => setWalletCashMap(m => ({ ...m, ref:v }))} />
+            </div>}
+          </div>}
         </div>
 
-        {/* Actions */}
         <div className="flex gap-3 flex-wrap">
           <button onClick={run} disabled={!canRun || loading}
             className="px-6 py-2.5 bg-blue-600 text-white rounded-lg disabled:opacity-40 font-medium hover:bg-blue-700 transition-colors flex items-center gap-2">
             {loading ? <><span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />جاري المعالجة...</> : "▶ تشغيل المطابقة"}
           </button>
+          <button onClick={() => {
+              if (!activeBank.length || !activeCashier.length) return;
+              const res = reconcileAdvanced(activeBank, activeCashier.filter(c => !specialCashierIds.has(c.id)), savedKeys, savedCashierIds, savedBankIds, visaCashierIds);
+              setAdvancedResults(res);
+              setTab("newMethod");
+              setToast(`المطابقة المتقدمة: ${res.length} نتيجة برقم المرجع والمفاتيح المركبة`);
+            }} disabled={!canRun}
+            className="px-4 py-2.5 bg-violet-600 text-white rounded-lg disabled:opacity-40 font-medium hover:bg-violet-700 transition-colors flex items-center gap-2 text-sm">
+            <Sparkles className="w-4 h-4"/>المطابقة المتقدمة (مفاتيح مركبة)
+          </button>
           {results && (
             <button onClick={() => {
                 try {
-                  doExport(results, savedMatches, visaItems, buildResumeData());
+                  doExport(results, savedMatches, visaItems, heldItems, buildResumeData());
                 } catch (e) {
                   console.error("فشل تصدير الملف:", e);
                   setError("صار خطأ أثناء تصدير الملف. جرّب تاني.");
@@ -2511,18 +2884,20 @@ export default function App() {
           </label>
         </div>
 
-        {/* Results */}
         {results && stats && (
           <div className="space-y-4">
-            <div className="grid grid-cols-3 sm:grid-cols-7 gap-2">
+            <div className="grid grid-cols-4 sm:grid-cols-8 gap-2">
               {([
                 { id: "saved", label: "✅ مؤكد", count: stats.saved, color: "text-green-700" },
                 { id: "pending", label: "⏳ منتظر", count: stats.pending, color: "text-blue-700" },
                 { id: "manual", label: "🛠️ يدوي", count: stats.manual, color: "text-amber-700" },
+                { id: "newMethod", label: "🔑 مركبة", count: advancedResults.length, color: "text-violet-700" },
                 { id: "visa", label: "💳 فيزا", count: stats.visa, color: "text-teal-700" },
+                { id: "jawwalPay", label: "📱 جوال بي", count: stats.jawwalPay, color: "text-cyan-700" },
+                { id: "mahmoudWallet", label: "💼 محفظة محمود", count: stats.mahmoudWallet, color: "text-indigo-700" },
                 { id: "held", label: "🗂️ معلقة", count: stats.held, color: "text-purple-700" },
-                { id: "uCashier", label: "❌ كاشير", count: stats.uCashier, color: "text-red-700" },
-                { id: "uBank", label: "🏛️ بنك", count: stats.uBank, color: "text-orange-700" },
+                { id: "uCashier", label: "❌ فواتير بلا حوالات مطابقة", count: stats.uCashier, color: "text-red-700" },
+                { id: "uBank", label: "🏛️ حوالات بلا فواتير مسجلة", count: stats.uBank, color: "text-orange-700" },
               ] as const).map(t => (
                 <button key={t.id} onClick={() => setTab(t.id as TabId)}
                   className={`p-2.5 rounded-xl border text-right transition-all ${tab === t.id ? "border-blue-500 bg-blue-50" : "bg-card hover:bg-muted/30"}`}>
@@ -2535,7 +2910,6 @@ export default function App() {
             <div className="border rounded-xl bg-card overflow-hidden">
               <FilterBar search={resultSearch} onSearch={setResultSearch} type={resultType} onType={setResultType} minAmount={minAmount} onMinAmount={setMinAmount} maxAmount={maxAmount} onMaxAmount={setMaxAmount} />
 
-              {/* Saved matches */}
               {tab === "saved" && (
                 <table className="w-full text-sm">
                   <thead><tr className="bg-muted text-xs">
@@ -2563,25 +2937,17 @@ export default function App() {
                             <td className="px-3 py-2.5 font-medium flex items-center gap-1.5">
                               <Shield className="w-3.5 h-3.5 text-green-600" />
                               {r.cashier.name}
-                              {isFromHeld && (
-                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-300">📦 من ملف سابق</span>
-                              )}
-                              {visaNum && (
-                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 border border-teal-300">💳 {visaNum}</span>
-                              )}
+                              {isFromHeld && <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-300">📦 من ملف سابق</span>}
+                              {visaNum && <span className="text-[9px] px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 border border-teal-300">💳 {visaNum}</span>}
                             </td>
                             <td className="px-3 py-2.5 text-muted-foreground text-xs">
                               {r.bank.description}
-                              {sm.bankAccountType && (
-                                <div className="text-[10px] text-muted-foreground">{sm.bankAccountType}</div>
-                              )}
+                              {sm.bankAccountType && <div className="text-[10px] text-muted-foreground">{sm.bankAccountType}</div>}
                             </td>
                             <td className={`px-3 py-2.5 text-xs font-semibold ${typeColor}`}>{sm.type}</td>
                             <td className="px-3 py-2.5 font-mono font-bold text-green-700">
                               {fmtNum(r.bank.rawAmount)}
-                              {sm.isAmountDiff && (
-                                <div className="text-[10px] text-orange-600 font-normal">كاشير: {fmtNum(r.cashier.amount)}</div>
-                              )}
+                              {sm.isAmountDiff && <div className="text-[10px] text-orange-600 font-normal">كاشير: {fmtNum(r.cashier.amount)}</div>}
                             </td>
                             <td className="px-3 py-2.5 text-xs">{matchTypeLabel}</td>
                             <td className="px-3 py-2.5"><ConfidenceBadge score={sm.matchScore} /></td>
@@ -2590,18 +2956,10 @@ export default function App() {
                                 <span className="text-green-600 bg-green-50 px-1.5 py-0.5 rounded text-xs border border-green-200 flex items-center gap-0.5 w-fit">
                                   <Check className="w-2.5 h-2.5"/>✓ محفوظ
                                 </span>
-                                {sm.isAmountDiff && (
-                                  <div className="text-[10px] text-amber-600">⚠️ اختلاف مبلغ</div>
-                                )}
-                                {sm.isNameDiff && (
-                                  <div className="text-[10px] text-amber-600">⚠️ اختلاف اسم</div>
-                                )}
-                                {sm.isAccountTypeDiff && (
-                                  <div className="text-[10px] text-orange-700 font-medium">🏦 {sm.bankAccountType || "؟"} ↔ {sm.cashierAccountType || "؟"}</div>
-                                )}
-                                {sm.note && (
-                                  <div className="text-[10px] text-gray-500">📝 {sm.note}</div>
-                                )}
+                                {sm.isAmountDiff && <div className="text-[10px] text-amber-600">⚠️ اختلاف مبلغ</div>}
+                                {sm.isNameDiff && <div className="text-[10px] text-amber-600">⚠️ اختلاف اسم</div>}
+                                {sm.isAccountTypeDiff && <div className="text-[10px] text-orange-700 font-medium">🏦 {sm.bankAccountType || "؟"} ↔ {sm.cashierAccountType || "؟"}</div>}
+                                {sm.note && <div className="text-[10px] text-gray-500">📝 {sm.note}</div>}
                               </div>
                             </td>
                             <td className="px-3 py-2.5 text-center">
@@ -2615,9 +2973,7 @@ export default function App() {
                             <tr className="bg-green-50 border-t border-green-200">
                               <td colSpan={7} className="px-4 py-3">
                                 <div className="flex items-center gap-3 flex-wrap">
-                                  <span className="text-xs text-green-700 font-medium">
-                                    {r.cashier.name} ↔ {r.bank.description.slice(0, 30)}...
-                                  </span>
+                                  <span className="text-xs text-green-700 font-medium">{r.cashier.name} ↔ {r.bank.description.slice(0, 30)}...</span>
                                   <button onClick={() => handleUnsaveMatch(sm)}
                                     className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 text-amber-600 border border-amber-200 rounded-lg text-xs hover:bg-amber-100 transition-colors">
                                     <Link2Off className="w-3.5 h-3.5"/>إلغاء الحفظ
@@ -2632,12 +2988,8 @@ export default function App() {
                                       <CreditCard className="w-3.5 h-3.5"/>نقل للفيزا
                                     </button>
                                   )}
-                                  <span className="text-xs text-muted-foreground">
-                                    {sm.type}: {fmtNum(r.bank.rawAmount)}
-                                  </span>
-                                  <button onClick={() => setExpandedMatchKey(null)} className="mr-auto p-1 text-muted-foreground hover:text-foreground">
-                                    <X className="w-3.5 h-3.5"/>
-                                  </button>
+                                  <span className="text-xs text-muted-foreground">{sm.type}: {fmtNum(r.bank.rawAmount)}</span>
+                                  <button onClick={() => setExpandedMatchKey(null)} className="mr-auto p-1 text-muted-foreground hover:text-foreground"><X className="w-3.5 h-3.5"/></button>
                                 </div>
                               </td>
                             </tr>
@@ -2650,14 +3002,12 @@ export default function App() {
                 </table>
               )}
 
-              {/* Pending matches */}
               {tab === "pending" && (
-                <div>
-                  {(stats.uCashier > 0 && stats.uBank > 0) && (
+                <div className="flex gap-4">
+                <div className="flex-1 min-w-0 overflow-hidden">
+                  {pendingRows.length > 0 && (
                     <div className="flex items-center gap-3 px-4 py-2.5 bg-indigo-50/60 border-b border-indigo-100 flex-wrap">
-                      <span className="text-xs text-indigo-800">
-                        فيه {stats.uCashier} فاتورة و{stats.uBank} حوالة لسا مش متطابقين — جرّب إعادة فرز أوسع عليهم
-                      </span>
+                      <span className="text-xs text-indigo-800">إعادة المطابقة بتفحص المنتظرة، تفك ربط الضعيفة وتعيد فرزها</span>
                       <button onClick={handleRetryMatch}
                         className="mr-auto flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-medium hover:bg-indigo-700 transition-colors">
                         🔄 إعادة المطابقة
@@ -2665,6 +3015,7 @@ export default function App() {
                     </div>
                   )}
                   {pendingRows.length > 0 && (
+                    <>
                     <div className="flex items-center gap-3 px-4 py-2.5 bg-blue-50/60 border-b border-blue-100 flex-wrap">
                       <label className="flex items-center gap-1.5 text-xs font-medium text-blue-800 cursor-pointer">
                         <input type="checkbox" checked={allPendingSelected} onChange={togglePendingSelectAll} className="rounded"/>
@@ -2686,6 +3037,10 @@ export default function App() {
                         </button>
                       </div>
                     </div>
+                    <div className="px-4 py-1.5 bg-indigo-50/50 border-b border-indigo-100 text-[11px] text-indigo-700">
+                      💡 اضغط "بحث وسحب" بجانب بيان البنك لاستبدال الحوالة، أو بجانب اسم الكاشير لاستبدال الفاتورة — وبعدين اسحب العنصر من اللوحة وأفلته فوق نفس الخانة بالجدول.
+                    </div>
+                    </>
                   )}
                   <table className="w-full text-sm">
                     <thead><tr className="bg-muted text-xs">
@@ -2709,44 +3064,51 @@ export default function App() {
                                               r.matchType === "fourthName" ? "👤 الرابع" :
                                               r.matchType === "exact" ? "🎯 تطابق تام" :
                                               r.matchType === "bundle" ? "📊 تجميع" :
-                                              r.matchType === "typo" ? "✏️ تقريبي" :
-                                              "❓ غير محدد";
+                                              r.matchType === "typo" ? "✏️ تقريبي" : "❓ غير محدد";
                         const isFromHeld = !!r.cashier._fromHeld || !!r.bank._fromHeld;
                         const visaNum = extractVisaNumber(r.cashier.rawName);
                         return (
                           <React.Fragment key={i}>
-                            <tr className={`border-t transition-colors ${isDropTarget ? "bg-green-100 ring-2 ring-green-400 ring-inset" : isSelected ? "bg-blue-50/70" : isExpanded ? "bg-blue-50" : isFromHeld ? "bg-purple-50/50 hover:bg-purple-50" : r.isApprox ? "bg-amber-50/30 hover:bg-amber-50/60" : "hover:bg-muted/20"}`}>
+                            <tr ref={row => { pendingRowRefs.current[key] = row; }} className={`border-t transition-colors ${isDropTarget ? (drawerMode === "bank" ? "bg-blue-50 ring-2 ring-blue-400 ring-inset" : "bg-emerald-50 ring-2 ring-emerald-400 ring-inset") : isSelected ? "bg-blue-50/70" : isExpanded ? "bg-blue-50" : isFromHeld ? "bg-purple-50/50 hover:bg-purple-50" : r.isApprox ? "bg-amber-50/30 hover:bg-amber-50/60" : "hover:bg-muted/20"}`}>
                               <td className="px-3 py-2.5">
                                 <div onClick={() => togglePendingSelect(key)}
                                   className={`w-4 h-4 rounded border-2 flex items-center justify-center cursor-pointer transition-colors ${isSelected?"bg-blue-600 border-blue-600":"border-border"}`}>
                                   {isSelected && <Check className="w-2.5 h-2.5 text-white"/>}
                                 </div>
                               </td>
-                              <td className="px-3 py-2.5 font-medium">
-                                {r.cashier.name}
-                                {r.cashier.accountType && (
-                                  <div className="text-[10px] text-muted-foreground font-normal">{r.cashier.accountType}</div>
-                                )}
-                                {isFromHeld && (
-                                  <span className="mr-1.5 text-[9px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-300">📦 من ملف سابق</span>
-                                )}
-                                {visaNum && (
-                                  <span className="mr-1.5 text-[9px] px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 border border-teal-300">💳 {visaNum}</span>
-                                )}
+                              <td
+                                className={`px-3 py-2.5 font-medium transition-colors ${isDropTarget && drawerMode === "cashier" ? "bg-emerald-100" : ""}`}
+                                onDragOver={(e) => { if (draggedItemId !== null && drawerMode === "cashier") { e.preventDefault(); setDropTargetKey(key); } }}
+                                onDragLeave={() => { if (dropTargetKey === key) setDropTargetKey(null); }}
+                                onDrop={(e) => { e.preventDefault(); if (draggedItemId !== null && drawerMode === "cashier") { handleDropCashier(r.bank, r.cashier, draggedItemId); } setDraggedItemId(null); }}
+                              >
+                                <div className="flex items-center gap-1.5">
+                                  <span className="flex-1">
+                                    {r.cashier.name}
+                                    {r.cashier.accountType && <div className="text-[10px] text-muted-foreground font-normal">{r.cashier.accountType}</div>}
+                                  </span>
+                                  {isFromHeld && <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-300 shrink-0">📦 من ملف سابق</span>}
+                                  {visaNum && <span className="text-[9px] px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 border border-teal-300 shrink-0">💳 {visaNum}</span>}
+                                  <button
+                                    onClick={() => openDrawer(r.cashier, r.bank, "cashier")}
+                                    title="افتح قائمة فواتير الكاشير للبحث والسحب"
+                                    className="px-1.5 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded text-[10px] font-medium hover:bg-emerald-100 transition-colors flex items-center gap-0.5 shrink-0"
+                                  >
+                                    <Search className="w-2.5 h-2.5"/>بحث وسحب
+                                  </button>
+                                </div>
                               </td>
                               <td
-                                className={`px-3 py-2.5 text-muted-foreground text-xs transition-colors ${isDropTarget ? "bg-green-100" : ""}`}
-                                onDragOver={(e) => { if (draggedBankId !== null) { e.preventDefault(); setDropTargetKey(key); } }}
+                                className={`px-3 py-2.5 text-muted-foreground text-xs transition-colors ${isDropTarget && drawerMode === "bank" ? "bg-blue-100" : ""}`}
+                                onDragOver={(e) => { if (draggedItemId !== null && drawerMode === "bank") { e.preventDefault(); setDropTargetKey(key); } }}
                                 onDragLeave={() => { if (dropTargetKey === key) setDropTargetKey(null); }}
-                                onDrop={(e) => { e.preventDefault(); if (draggedBankId !== null) { handleDropBank(r.cashier, r.bank, draggedBankId); } setDraggedBankId(null); }}
+                                onDrop={(e) => { e.preventDefault(); if (draggedItemId !== null && drawerMode === "bank") { handleDropBank(r.cashier, r.bank, draggedItemId); } setDraggedItemId(null); }}
                               >
                                 <div className="flex items-center gap-1.5">
                                   <span className="flex-1">{r.bank.description}</span>
-                                  {r.bank.accountType && (
-                                    <span className="text-[10px] text-muted-foreground">{r.bank.accountType}</span>
-                                  )}
+                                  {r.bank.accountType && <span className="text-[10px] text-muted-foreground">{r.bank.accountType}</span>}
                                   <button
-                                    onClick={() => openDrawer(r.cashier, r.bank)}
+                                    onClick={() => openDrawer(r.cashier, r.bank, "bank")}
                                     title="افتح قائمة الحوالات للبحث والسحب"
                                     className="px-1.5 py-0.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded text-[10px] font-medium hover:bg-indigo-100 transition-colors flex items-center gap-0.5 shrink-0"
                                   >
@@ -2755,9 +3117,7 @@ export default function App() {
                                 </div>
                               </td>
                               <td className={`px-3 py-2.5 text-xs font-semibold ${typeColor}`}>{r.cashier.type}</td>
-                              <td className="px-3 py-2.5 font-mono font-bold text-blue-700">
-                                {fmtNum(r.bank.rawAmount)}
-                              </td>
+                              <td className="px-3 py-2.5 font-mono font-bold text-blue-700">{fmtNum(r.bank.rawAmount)}</td>
                               <td className="px-3 py-2.5 text-xs">{matchTypeLabel}</td>
                               <td className="px-3 py-2.5">
                                 <div className="flex flex-col gap-1">
@@ -2816,9 +3176,7 @@ export default function App() {
                               <tr className="bg-blue-50 border-t border-blue-200">
                                 <td colSpan={8} className="px-4 py-3">
                                   <div className="flex items-center gap-3 flex-wrap">
-                                    <span className="text-xs text-blue-700 font-medium">
-                                      {r.cashier.name} ↔ {r.bank.description.slice(0, 30)}...
-                                    </span>
+                                    <span className="text-xs text-blue-700 font-medium">{r.cashier.name} ↔ {r.bank.description.slice(0, 30)}...</span>
                                     <button onClick={() => handleSaveMatch(r.cashier, r.bank)}
                                       className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs hover:bg-green-700 transition-colors">
                                       <Save className="w-3.5 h-3.5"/>حفظ المطابقة
@@ -2833,12 +3191,8 @@ export default function App() {
                                         <CreditCard className="w-3.5 h-3.5"/>نقل للفيزا
                                       </button>
                                     )}
-                                    <span className="text-xs text-muted-foreground">
-                                      {r.cashier.type}: {fmtNum(r.bank.rawAmount)}
-                                    </span>
-                                    <button onClick={() => setExpandedMatchKey(null)} className="mr-auto p-1 text-muted-foreground hover:text-foreground">
-                                      <X className="w-3.5 h-3.5"/>
-                                    </button>
+                                    <span className="text-xs text-muted-foreground">{r.cashier.type}: {fmtNum(r.bank.rawAmount)}</span>
+                                    <button onClick={() => setExpandedMatchKey(null)} className="mr-auto p-1 text-muted-foreground hover:text-foreground"><X className="w-3.5 h-3.5"/></button>
                                   </div>
                                 </td>
                               </tr>
@@ -2851,29 +3205,136 @@ export default function App() {
                   </table>
                   {visiblePendingRows.length > PENDING_PAGE_SIZE && (
                     <div className="flex items-center justify-center gap-3 px-4 py-3 border-t border-border bg-muted/30 text-xs">
-                      <button
-                        onClick={() => setPendingPage(p => Math.max(1, p - 1))}
-                        disabled={pendingPage <= 1}
-                        className="px-3 py-1.5 rounded-lg border border-border bg-card disabled:opacity-40 hover:bg-muted/50 transition-colors flex items-center gap-1"
-                      >
+                      <button onClick={() => setPendingPage(p => Math.max(1, p - 1))} disabled={pendingPage <= 1}
+                        className="px-3 py-1.5 rounded-lg border border-border bg-card disabled:opacity-40 hover:bg-muted/50 transition-colors flex items-center gap-1">
                         <ChevronRight className="w-3.5 h-3.5"/>السابق
                       </button>
                       <span className="text-muted-foreground">
                         صفحة {pendingPage} من {Math.max(1, Math.ceil(visiblePendingRows.length / PENDING_PAGE_SIZE))} · عرض {pagedPendingRows.length} من {visiblePendingRows.length}
                       </span>
-                      <button
-                        onClick={() => setPendingPage(p => Math.min(Math.max(1, Math.ceil(visiblePendingRows.length / PENDING_PAGE_SIZE)), p + 1))}
+                      <button onClick={() => setPendingPage(p => Math.min(Math.max(1, Math.ceil(visiblePendingRows.length / PENDING_PAGE_SIZE)), p + 1))}
                         disabled={pendingPage >= Math.ceil(visiblePendingRows.length / PENDING_PAGE_SIZE)}
-                        className="px-3 py-1.5 rounded-lg border border-border bg-card disabled:opacity-40 hover:bg-muted/50 transition-colors flex items-center gap-1"
-                      >
+                        className="px-3 py-1.5 rounded-lg border border-border bg-card disabled:opacity-40 hover:bg-muted/50 transition-colors flex items-center gap-1">
                         التالي<ChevronLeft className="w-3.5 h-3.5"/>
                       </button>
                     </div>
                   )}
                 </div>
+                {drawerOpen && drawerCashier && drawerOldBank && (
+                  <MatchDrawer
+                    mode={drawerMode}
+                    cashier={drawerCashier}
+                    oldBank={drawerOldBank}
+                    nameSearch={drawerNameSearch}
+                    amountFrom={drawerAmountFrom}
+                    amountTo={drawerAmountTo}
+                    banks={drawerBanks}
+                    cashiers={drawerCashiers}
+                    draggedItemId={draggedItemId}
+                    onNameSearch={setDrawerNameSearch}
+                    onAmountFrom={setDrawerAmountFrom}
+                    onAmountTo={setDrawerAmountTo}
+                    onDragStart={setDraggedItemId}
+                    onDragEnd={() => { setDraggedItemId(null); setDropTargetKey(null); }}
+                    onReplaceBank={(b) => handleReplaceBank(drawerCashier, drawerOldBank, b)}
+                    onReplaceCashier={(c) => handleReplaceCashier(drawerOldBank, drawerCashier, c)}
+                    onClose={closeDrawer}
+                  />
+                )}
+              </div>
               )}
 
-              {/* Manual tab */}
+              {tab === "newMethod" && (
+                <div>
+                  <div className="px-4 py-3 bg-violet-50/60 border-b border-violet-100">
+                    <p className="text-xs text-violet-800">
+                      🔑 المطابقة المركبة: تعتمد على الاسم والمبلغ فقط مع فرز تنافسي دقيق. تطابق الأسماء المتشابهة بمنع التداخل.
+                    </p>
+                  </div>
+                  {advancedResults.length > 0 && (
+                    <div className="flex items-center gap-3 px-4 py-2.5 bg-violet-50/40 border-b border-violet-100 flex-wrap">
+                      <label className="flex items-center gap-1.5 text-xs font-medium text-violet-800 cursor-pointer">
+                        <input type="checkbox" checked={allAdvancedSelected} onChange={toggleAdvancedSelectAll} className="rounded"/>
+                        تحديد الكل
+                      </label>
+                      <span className="text-xs text-muted-foreground">{selectedAdvancedKeys.size} محدد من {advancedResults.length}</span>
+                      <div className="mr-auto flex items-center gap-2 flex-wrap">
+                        <button onClick={handleSaveSelectedAdvanced} disabled={!selectedAdvancedKeys.size}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 disabled:opacity-40 transition-colors">
+                          <Save className="w-3.5 h-3.5"/>حفظ المحدد ({selectedAdvancedKeys.size})
+                        </button>
+                        <button onClick={() => {
+                          handleSaveMatchesBulk(advancedResults.map(a => ({ cashier: a.cashier, bank: a.bank })));
+                        }} className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 transition-colors flex items-center gap-1.5">
+                          <Save className="w-3.5 h-3.5"/>حفظ الكل ({advancedResults.length})
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  <table className="w-full text-sm">
+                    <thead><tr className="bg-muted text-xs">
+                      <th className="px-3 py-2.5 w-8"></th>
+                      <th className="px-3 py-2.5 text-right">البيان (الكاشير)</th>
+                      <th className="px-3 py-2.5 text-right">بيان البنك</th>
+                      <th className="px-3 py-2.5 text-right">النوع</th>
+                      <th className="px-3 py-2.5 text-right">مبلغ الكاشير</th>
+                      <th className="px-3 py-2.5 text-right">مبلغ البنك</th>
+                      <th className="px-3 py-2.5 text-right">طريقة المطابقة</th>
+                      <th className="px-3 py-2.5 text-right">الدرجة</th>
+                      <th className="px-3 py-2.5 text-right">إجراء</th>
+                    </tr></thead>
+                    <tbody>
+                      {advancedResults.map((a, i) => {
+                        const key = `${a.cashier.id}-${a.bank.id}`;
+                        const isSelected = selectedAdvancedKeys.has(key);
+                        const typeColor = a.cashier.type === "مدفوع" ? "text-red-600" : "text-green-600";
+                        const scoreColor = a.score >= 0.9 ? "text-green-700 bg-green-50 border-green-200" : a.score >= 0.6 ? "text-amber-700 bg-amber-50 border-amber-200" : "text-red-700 bg-red-50 border-red-200";
+                        return (
+                          <tr key={i} className={`border-t transition-colors ${isSelected ? "bg-violet-50/70" : "hover:bg-muted/20"}`}>
+                            <td className="px-3 py-2.5">
+                              <div onClick={() => toggleAdvancedSelect(key)}
+                                className={`w-4 h-4 rounded border-2 flex items-center justify-center cursor-pointer transition-colors ${isSelected?"bg-violet-600 border-violet-600":"border-border"}`}>
+                                {isSelected && <Check className="w-2.5 h-2.5 text-white"/>}
+                              </div>
+                            </td>
+                            <td className="px-3 py-2.5 font-medium">{a.cashier.name}</td>
+                            <td className="px-3 py-2.5 text-muted-foreground text-xs">{a.bank.description}</td>
+                            <td className={`px-3 py-2.5 text-xs font-semibold ${typeColor}`}>{a.cashier.type}</td>
+                            <td className="px-3 py-2.5 font-mono font-semibold text-green-700">{fmtNum(a.cashier.matchAmount)}</td>
+                            <td className="px-3 py-2.5 font-mono font-semibold text-blue-700">{fmtNum(a.bank.rawAmount)}</td>
+                            <td className="px-3 py-2.5 text-xs">
+                              <span className={`px-1.5 py-0.5 rounded border text-xs font-medium ${a.matchType === "name+amount" ? "bg-blue-50 text-blue-700 border-blue-200" : "bg-gray-50 text-gray-700 border-gray-200"}`}>
+                                {a.matchType === "name+amount" ? "👤 اسم + مبلغ" : "💰 مبلغ فقط"}
+                              </span>
+                              <div className="text-[10px] text-muted-foreground mt-0.5">{a.reason}</div>
+                            </td>
+                            <td className="px-3 py-2.5">
+                              <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold ${scoreColor}`}>{Math.round(a.score * 100)}%</span>
+                            </td>
+                            <td className="px-3 py-2.5">
+                              <div className="flex flex-col gap-1">
+                                <button onClick={() => {
+                                  handleSaveMatch(a.cashier, a.bank);
+                                }} className="px-2 py-0.5 bg-green-600 text-white rounded text-[10px] hover:bg-green-700 transition-colors flex items-center gap-0.5 w-fit">
+                                  <Save className="w-2.5 h-2.5"/>حفظ
+                                </button>
+                                <button onClick={() => {
+                                  setAdvancedResults(prev => prev.filter(x => x !== a));
+                                  setSelectedAdvancedKeys(prev => { const n = new Set(prev); n.delete(key); return n; });
+                                }} className="px-2 py-0.5 bg-red-50 text-red-600 border border-red-200 rounded text-[10px] hover:bg-red-100 transition-colors flex items-center gap-0.5 w-fit">
+                                  <X className="w-2.5 h-2.5"/>إزالة
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                      {!advancedResults.length && <tr><td colSpan={9} className="py-10 text-center text-muted-foreground text-xs">اضغط "المطابقة المتقدمة" بالأعلى لتشغيل المطابقة بالاسم والمبلغ مع فرز تنافسي دقيق</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
               {tab === "manual" && (
                 <div className="p-4 text-center text-muted-foreground text-xs">
                   <p>المطابقات اليدوية تذهب مباشرة إلى "المؤكدة"</p>
@@ -2881,7 +3342,6 @@ export default function App() {
                 </div>
               )}
 
-              {/* Visa tab */}
               {tab === "visa" && (
                 <div>
                   <div className="px-4 py-3 bg-teal-50/60 border-b border-teal-100">
@@ -2936,7 +3396,82 @@ export default function App() {
                 </div>
               )}
 
-              {/* Held items (معلقات) */}
+              {tab === "jawwalPay" && (
+                <div>
+                  <div className="border-b border-cyan-100 bg-cyan-50/60 px-4 py-3">
+                    <p className="text-xs text-cyan-800">📱 هذه الخانة خاصة بكل الفواتير التي تحتوي على «جوال» أو «جوال بي». لا تدخل هذه الفواتير في المطابقة.</p>
+                  </div>
+                  <table className="w-full text-sm">
+                    <thead><tr className="bg-muted text-xs">
+                      <th className="px-3 py-2.5 text-right">الاسم</th>
+                      <th className="px-3 py-2.5 text-right">البيان الأصلي</th>
+                      <th className="px-3 py-2.5 text-right">النوع</th>
+                      <th className="px-3 py-2.5 text-right">المبلغ</th>
+                      <th className="px-3 py-2.5 text-right">نوع الحساب</th>
+                      <th className="px-3 py-2.5 text-right">التاريخ</th>
+                      <th className="px-3 py-2.5 text-right">إجراء</th>
+                    </tr></thead>
+                    <tbody>
+                      {results.filter(r => r.type === "jawwalPay").map((r: any) => (
+                        <tr key={r.cashier.id} className="border-t">
+                          <td className="px-3 py-2.5 font-medium">{r.cashier.name}</td>
+                          <td className="px-3 py-2.5">{r.cashier.rawName}</td>
+                          <td className="px-3 py-2.5">{r.cashier.type}</td>
+                          <td className="px-3 py-2.5 font-mono font-bold text-cyan-700">{fmtNum(r.cashier.amount)}</td>
+                          <td className="px-3 py-2.5">{r.cashier.accountType || "—"}</td>
+                          <td className="px-3 py-2.5">{r.cashier.date || "—"}</td>
+                          <td className="px-3 py-2.5">
+                            <button onClick={() => handleRejectSpecialCashier(r.cashier)}
+                              className="flex items-center gap-1 px-2.5 py-1.5 bg-amber-50 text-amber-700 border border-amber-200 rounded-lg text-xs hover:bg-amber-100 transition-colors">
+                              <X className="w-3.5 h-3.5"/>رفض وإرجاع للمنتظر
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                      {!results.some(r => r.type === "jawwalPay") && <tr><td colSpan={7} className="py-10 text-center text-muted-foreground text-xs">لا توجد فواتير جوال بي.</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {tab === "mahmoudWallet" && (
+                <div>
+                  <div className="border-b border-indigo-100 bg-indigo-50/60 px-4 py-3">
+                    <p className="text-xs text-indigo-800">💼 هذه الخانة خاصة بكل الفواتير التي تحتوي على «محفظة محمود». لا تدخل هذه الفواتير في المطابقة.</p>
+                  </div>
+                  <table className="w-full text-sm">
+                    <thead><tr className="bg-muted text-xs">
+                      <th className="px-3 py-2.5 text-right">الاسم</th>
+                      <th className="px-3 py-2.5 text-right">البيان الأصلي</th>
+                      <th className="px-3 py-2.5 text-right">النوع</th>
+                      <th className="px-3 py-2.5 text-right">المبلغ</th>
+                      <th className="px-3 py-2.5 text-right">نوع الحساب</th>
+                      <th className="px-3 py-2.5 text-right">التاريخ</th>
+                      <th className="px-3 py-2.5 text-right">إجراء</th>
+                    </tr></thead>
+                    <tbody>
+                      {results.filter(r => r.type === "mahmoudWallet").map((r: any) => (
+                        <tr key={r.cashier.id} className="border-t">
+                          <td className="px-3 py-2.5 font-medium">{r.cashier.name}</td>
+                          <td className="px-3 py-2.5">{r.cashier.rawName}</td>
+                          <td className="px-3 py-2.5">{r.cashier.type}</td>
+                          <td className="px-3 py-2.5 font-mono font-bold text-indigo-700">{fmtNum(r.cashier.amount)}</td>
+                          <td className="px-3 py-2.5">{r.cashier.accountType || "—"}</td>
+                          <td className="px-3 py-2.5">{r.cashier.date || "—"}</td>
+                          <td className="px-3 py-2.5">
+                            <button onClick={() => handleRejectSpecialCashier(r.cashier)}
+                              className="flex items-center gap-1 px-2.5 py-1.5 bg-amber-50 text-amber-700 border border-amber-200 rounded-lg text-xs hover:bg-amber-100 transition-colors">
+                              <X className="w-3.5 h-3.5"/>رفض وإرجاع للمنتظر
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                      {!results.some(r => r.type === "mahmoudWallet") && <tr><td colSpan={7} className="py-10 text-center text-muted-foreground text-xs">لا توجد فواتير محفظة محمود.</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
               {tab === "held" && (
                 <table className="w-full text-sm">
                   <thead><tr className="bg-muted text-xs">
@@ -2993,6 +3528,8 @@ export default function App() {
                     <th className="px-3 py-2.5 text-right">البيان</th>
                     <th className="px-3 py-2.5 text-right">النوع</th>
                     <th className="px-3 py-2.5 text-right">المبلغ</th>
+                    <th className="px-3 py-2.5 text-right">نوع الحساب المسجل</th>
+                    <th className="px-3 py-2.5 text-right">اسم المستخدم</th>
                     <th className="px-3 py-2.5 text-right">السبب</th>
                     <th className="px-3 py-2.5 text-right">اقتراح</th>
                     <th className="px-3 py-2.5 text-right">إجراء</th>
@@ -3001,52 +3538,34 @@ export default function App() {
                     {visibleUCashierRows.map((r: any, i: number) => {
                       const isExpanded = expandedUnmatchedCashier === r.cashier.id;
                       const typeColor = r.cashier.type === "مدفوع" ? "text-red-600" : "text-green-600";
-
                       const rejectedForThisCashier = new Set(
-                        Array.from(rejectedPairs)
-                          .filter(key => key.startsWith(`${r.cashier.id}-`))
-                          .map(key => parseInt(key.split('-')[1]))
+                        Array.from(rejectedPairs).filter(key => key.startsWith(`${r.cashier.id}-`)).map(key => parseInt(key.split('-')[1]))
                       );
-
                       const availableBanks = unmatchedBankForSuggestions.filter(
                         b => !rejectedForThisCashier.has(b.id) && !savedBankIds.has(b.id) && b.type === r.cashier.type
                       );
-
-                      const suggestions = isExpanded ? getSuggestions(
-                        r.cashier,
-                        availableBanks,
-                        rejectedPairs,
-                        savedKeys,
-                        claimedNames,
-                        suggestionOwnerMap
-                      ) : [];
+                      const suggestions = isExpanded ? getSuggestions(r.cashier, availableBanks, rejectedPairs, savedKeys, claimedNames, suggestionOwnerMap, nameAliases) : [];
                       const isFromHeld = !!r.cashier._fromHeld;
                       const visaNum = extractVisaNumber(r.cashier.rawName);
-
                       return (
                         <React.Fragment key={i}>
                           <tr className={`border-t transition-colors ${isExpanded ? "bg-blue-50" : isFromHeld ? "bg-purple-50/50 hover:bg-purple-50" : r.reason === "اختلاف في الاسم" ? "bg-amber-50/30 hover:bg-amber-50/60" : "hover:bg-muted/20"}`}>
                             <td className="px-3 py-2.5 font-medium">
                               {r.cashier.name}
-                              {isFromHeld && (
-                                <span className="mr-1.5 text-[9px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-300">📦 من ملف سابق</span>
-                              )}
-                              {visaNum && (
-                                <span className="mr-1.5 text-[9px] px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 border border-teal-300">💳 {visaNum}</span>
-                              )}
+                              {isFromHeld && <span className="mr-1.5 text-[9px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-300">📦 من ملف سابق</span>}
+                              {visaNum && <span className="mr-1.5 text-[9px] px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 border border-teal-300">💳 {visaNum}</span>}
                             </td>
                             <td className={`px-3 py-2.5 text-xs font-semibold ${typeColor}`}>{r.cashier.type}</td>
                             <td className="px-3 py-2.5 font-mono font-semibold text-red-700">{fmtNum(r.cashier.amount)}</td>
+                            <td className="px-3 py-2.5">{r.cashier.accountType || "—"}</td>
+                            <td className="px-3 py-2.5">{r.cashier.rawName || "—"}</td>
                             <td className="px-3 py-2.5">
-                              <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${r.reason === "اختلاف في الاسم" ? "bg-amber-100 text-amber-800" : "bg-red-100 text-red-800"}`}>
-                                {r.reason}
-                              </span>
+                              <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${r.reason === "اختلاف في الاسم" ? "bg-amber-100 text-amber-800" : "bg-red-100 text-red-800"}`}>{r.reason}</span>
                             </td>
                             <td className="px-3 py-2.5">
                               <button onClick={() => setExpandedUnmatchedCashier(isExpanded ? null : r.cashier.id)}
                                 className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${isExpanded ? "bg-blue-100 text-blue-700" : "bg-muted hover:bg-muted/80 text-muted-foreground"}`}>
-                                <Sparkles className="w-3.5 h-3.5"/>
-                                {isExpanded ? "إخفاء" : "اقتراح بديل"}
+                                <Sparkles className="w-3.5 h-3.5"/>{isExpanded ? "إخفاء" : "اقتراح بديل"}
                               </button>
                             </td>
                             <td className="px-3 py-2.5">
@@ -3071,9 +3590,7 @@ export default function App() {
                               <td colSpan={6} className="px-4 py-3">
                                 {suggestions.length === 0 ? (
                                   <p className="text-xs text-muted-foreground">
-                                    {availableBanks.length === 0 ?
-                                      "جميع الحوالات البنكية المتاحة تم رفضها أو حفظها لهذا الكاشير" :
-                                      "لم يتم إيجاد اقتراحات مشابهة من البنك (لا الاسم ولا المبلغ متطابقان)."}
+                                    {availableBanks.length === 0 ? "جميع الحوالات البنكية المتاحة تم رفضها أو حفظها لهذا الكاشير" : "لم يتم إيجاد اقتراحات مشابهة من البنك (لا الاسم ولا المبلغ متطابقان)."}
                                   </p>
                                 ) : (
                                   <div className="space-y-2">
@@ -3083,8 +3600,7 @@ export default function App() {
                                                             matchType === "fourthName" ? "👤 الرابع" :
                                                             matchType === "exact" ? "🎯 تطابق تام" :
                                                             matchType === "typo" ? "✏️ اسم تقريبي" :
-                                                            matchType === "amount_only" ? "💰 مبلغ فقط (ضعيف)" :
-                                                            "❓ غير محدد";
+                                                            matchType === "amount_only" ? "💰 مبلغ فقط (ضعيف)" : "❓ غير محدد";
                                       const weak = matchType === "amount_only";
                                       return (
                                         <div key={bank.id} className={`flex items-center gap-3 p-2.5 bg-white rounded-lg border ${weak ? "border-gray-200" : "border-blue-200"}`}>
@@ -3094,9 +3610,7 @@ export default function App() {
                                             <span className="text-muted-foreground mr-2">{fmtNum(bank.rawAmount)}</span>
                                             <span className={`mr-1 ${weak ? "text-gray-400" : "text-blue-500"}`}>({(score * 100).toFixed(0)}% تطابق)</span>
                                             <span className="text-gray-400 mr-1">| {matchTypeLabel}</span>
-                                            {amountDiff > 0.01 && (
-                                              <span className="text-orange-500 mr-1">| فرق: {fmtNum(amountDiff)}</span>
-                                            )}
+                                            {amountDiff > 0.01 && <span className="text-orange-500 mr-1">| فرق: {fmtNum(amountDiff)}</span>}
                                             <div className="text-[10px] text-gray-400 mt-0.5">{reason}</div>
                                           </div>
                                           <button onClick={() => handleAcceptSuggestion(r.cashier, bank)}
@@ -3126,18 +3640,18 @@ export default function App() {
                         </React.Fragment>
                       );
                     })}
-                    {!visibleUCashierRows.length && <tr><td colSpan={6} className="py-10 text-center text-muted-foreground text-xs">لا توجد سجلات تطابق الفلاتر</td></tr>}
+                    {!visibleUCashierRows.length && <tr><td colSpan={8} className="py-10 text-center text-muted-foreground text-xs">لا توجد سجلات تطابق الفلاتر</td></tr>}
                   </tbody>
                 </table>
               )}
 
-              {/* Unmatched Bank */}
               {tab === "uBank" && (
                 <table className="w-full text-sm">
                   <thead><tr className="bg-muted text-xs">
-                    <th className="px-3 py-2.5 text-right">بيان البنك</th>
+                    <th className="px-3 py-2.5 text-right">البيان</th>
                     <th className="px-3 py-2.5 text-right">النوع</th>
                     <th className="px-3 py-2.5 text-right">المبلغ</th>
+                    <th className="px-3 py-2.5 text-right">نوع الحساب المسجل</th>
                     <th className="px-3 py-2.5 text-right">السبب</th>
                     <th className="px-3 py-2.5 text-right">تعليق</th>
                   </tr></thead>
@@ -3149,16 +3663,13 @@ export default function App() {
                         <tr key={i} className={`border-t transition-colors ${isFromHeld ? "bg-purple-50/50 hover:bg-purple-50" : "hover:bg-muted/20"}`}>
                           <td className="px-3 py-2.5 text-muted-foreground">
                             {r.bank.description}
-                            {isFromHeld && (
-                              <span className="mr-1.5 text-[9px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-300">📦 من ملف سابق</span>
-                            )}
+                            {isFromHeld && <span className="mr-1.5 text-[9px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-300">📦 من ملف سابق</span>}
                           </td>
                           <td className={`px-3 py-2.5 text-xs font-semibold ${typeColor}`}>{r.bank.type}</td>
                           <td className="px-3 py-2.5 font-mono font-semibold text-orange-700">{fmtNum(r.bank.rawAmount)}</td>
+                          <td className="px-3 py-2.5">{r.bank.accountType || "—"}</td>
                           <td className="px-3 py-2.5">
-                            <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${r.reason === "اختلاف في الاسم" ? "bg-amber-100 text-amber-800" : "bg-gray-100 text-gray-700"}`}>
-                              {r.reason}
-                            </span>
+                            <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${r.reason === "اختلاف في الاسم" ? "bg-amber-100 text-amber-800" : "bg-gray-100 text-gray-700"}`}>{r.reason}</span>
                           </td>
                           <td className="px-3 py-2.5">
                             <button onClick={() => handleHoldBank(r.bank)}
@@ -3170,117 +3681,10 @@ export default function App() {
                         </tr>
                       );
                     })}
-                    {!visibleUBankRows.length && <tr><td colSpan={5} className="py-10 text-center text-muted-foreground text-xs">لا توجد سجلات تطابق الفلاتر</td></tr>}
+                    {!visibleUBankRows.length && <tr><td colSpan={6} className="py-10 text-center text-muted-foreground text-xs">لا توجد سجلات تطابق الفلاتر</td></tr>}
                   </tbody>
                 </table>
               )}
-            </div>
-          </div>
-        )}
-
-        {/* ─── Side Drawer: بحث الحوالات وسحبها ─────────────────────────────────── */}
-        {drawerOpen && drawerCashier && (
-          <div className="fixed inset-0 z-40 flex" dir="rtl">
-            <div className="flex-1 bg-black/30" onClick={closeDrawer} />
-            <div className="w-[420px] max-w-[90vw] bg-card border-r border-border shadow-2xl flex flex-col h-full">
-              <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-border bg-muted/30">
-                <div className="min-w-0">
-                  <div className="text-xs text-muted-foreground">قائمة سحب الحوالات</div>
-                  <div className="text-sm font-bold truncate">{drawerCashier.name}</div>
-                  <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${drawerCashier.type === "مدفوع" ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700"}`}>{drawerCashier.type}</span>
-                    <span className="text-sm font-mono font-bold text-blue-700">{fmtNum(drawerCashier.matchAmount)}</span>
-                  </div>
-                  {drawerOldBank && (
-                    <div className="text-[10px] text-muted-foreground mt-1">
-                      الحوالة الحالية: <span className="text-muted-foreground">{drawerOldBank.description} ({fmtNum(drawerOldBank.rawAmount)})</span>
-                    </div>
-                  )}
-                </div>
-                <button onClick={closeDrawer} className="p-1.5 text-muted-foreground hover:bg-muted rounded-lg transition-colors shrink-0">
-                  <X className="w-4 h-4"/>
-                </button>
-              </div>
-
-              <div className="px-4 py-3 border-b border-border space-y-2 bg-card">
-                <div className="relative">
-                  <Search className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground"/>
-                  <input
-                    value={drawerNameSearch}
-                    onChange={e => setDrawerNameSearch(e.target.value)}
-                    placeholder="بحث بالاسم..."
-                    className="w-full pl-3 pr-9 py-2 text-sm border border-border rounded-lg bg-input-background focus:outline-none focus:ring-1 focus:ring-ring"
-                  />
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    value={drawerAmountFrom}
-                    onChange={e => setDrawerAmountFrom(e.target.value)}
-                    placeholder="من مبلغ"
-                    className="flex-1 rounded-lg border border-border bg-input-background px-2.5 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
-                  />
-                  <span className="text-muted-foreground text-xs">إلى</span>
-                  <input
-                    type="number"
-                    value={drawerAmountTo}
-                    onChange={e => setDrawerAmountTo(e.target.value)}
-                    placeholder="إلى مبلغ"
-                    className="flex-1 rounded-lg border border-border bg-input-background px-2.5 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
-                  />
-                </div>
-                <div className="text-[10px] text-muted-foreground">
-                  اسحب الحوالة من القائمة وأفلتها فوق خانة "بيان البنك" في الجدول لاستبدالها. أو اضغط "استبدال" مباشرة.
-                </div>
-              </div>
-
-              <div className="flex-1 overflow-y-auto">
-                {drawerBanks.length === 0 ? (
-                  <div className="p-8 text-center text-xs text-muted-foreground">
-                    لا توجد حوالات تطابق البحث. جرّب تعديل الاسم أو المبلغ.
-                  </div>
-                ) : (
-                  <div className="divide-y divide-border">
-                    {drawerBanks.map(b => {
-                      const diff = Math.abs(b.rawAmount - drawerCashier.matchAmount);
-                      const exact = diff <= 0.01;
-                      const sim = nameSim(drawerCashier.name, b.description);
-                      const isDragged = draggedBankId === b.id;
-                      return (
-                        <div
-                          key={b.id}
-                          draggable
-                          onDragStart={() => setDraggedBankId(b.id)}
-                          onDragEnd={() => { setDraggedBankId(null); setDropTargetKey(null); }}
-                          className={`px-4 py-3 cursor-grab hover:bg-blue-50/50 transition-colors ${isDragged ? "opacity-50" : ""}`}
-                        >
-                          <div className="flex items-center gap-2">
-                            <div className="flex-1 min-w-0">
-                              <div className="text-sm font-medium truncate">{b.description}</div>
-                              <div className="flex items-center gap-2 mt-1 flex-wrap">
-                                <span className="font-mono font-bold text-blue-700 text-sm">{fmtNum(b.rawAmount)}</span>
-                                {exact ? (
-                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-100 text-green-700 border border-green-300">نفس المبلغ</span>
-                                ) : (
-                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 border border-amber-300">فرق: {fmtNum(diff)}</span>
-                                )}
-                                <span className="text-[10px] text-muted-foreground">تشابه: {(sim*100).toFixed(0)}%</span>
-                                {b.accountType && <span className="text-[10px] text-muted-foreground">| {b.accountType}</span>}
-                              </div>
-                            </div>
-                            <button
-                              onClick={() => drawerOldBank && handleReplaceBank(drawerCashier, drawerOldBank, b)}
-                              className="px-2.5 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 transition-colors shrink-0 flex items-center gap-1"
-                            >
-                              <Check className="w-3 h-3"/>استبدال
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
             </div>
           </div>
         )}

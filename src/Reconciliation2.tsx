@@ -1,9 +1,10 @@
-import React, { useState, useCallback, useMemo, useEffect } from "react";
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, no-constant-binary-expression */
+import React, { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import * as XLSX from "xlsx";
 import {
   Upload, FileSpreadsheet, Download, ChevronDown, X,
-  Check, Search, ChevronLeft, CreditCard,
-  Save, Shield, Trash2, AlertTriangle, Sparkles, Clock, Info, RotateCcw
+  Check, ChevronLeft, CreditCard,
+  Shield, Trash2, Sparkles, Clock, Info, RotateCcw
 } from "lucide-react";
 
 // ─── Excel helpers ────────────────────────────────────────────────────────────
@@ -67,7 +68,7 @@ const AR_EN: Record<string, string> = {
   "َ":"","ُ":"","ِ":"","ْ":"","ً":"","ٌ":"","ٍ":"",
 };
 function normName(s: string) {
-  let c = s.toLowerCase()
+  const c = s.toLowerCase()
     .replace(/اجمد/g,"احمد")
     .replace(/تحويل\s+الكتروني\s+موبايل:/g,"")
     .replace(/الدفع\s+لصديق\s+من/g,"")
@@ -134,7 +135,7 @@ function advancedMatchCheck(cashierName: string, bankDesc: string): {
 }
 
 // ─── Visa number detection ────────────────────────────────────────────────────
-const VISA_NUM_RE = /[\/\-]\s*(\d{4})(?!\d)/;
+const VISA_NUM_RE = new RegExp("[/-]\\s*(\\d{4})(?!\\d)");
 function extractVisaNumber(rawName: string): string | null {
   const m = rawName.match(VISA_NUM_RE);
   return m ? m[1] : null;
@@ -262,7 +263,7 @@ function Sel({ label, headers, value, onChange }: { label:string; headers:string
   );
 }
 
-interface StageAResult {
+export interface StageAResult {
   id: number;
   source: string;
   name: string;
@@ -270,6 +271,10 @@ interface StageAResult {
   amount: number;
   databaseName: string;
   databaseAmount: number;
+  userId: string;
+  registrationTime: string;
+  customerNumber: string;
+  invoiceNumber: string;
   accountType: string;
   invoice: Record<string, unknown>;
   matched: boolean;
@@ -288,7 +293,7 @@ function stageANameKey(value: string): string {
 
 function classifyStageAInvoice(originalName: string, source: string): { category: "بنك فلسطين" | "محفظة تجارية" | "محفظة محمود" | "محفظة" | "جوال بي" | "فيزا"; categoryIssue: string } {
   const hasVisaNumber = /(?:^|[^\d])\d{4}(?:$|[^\d])/.test(originalName);
-  const normalized = originalName.toLowerCase().replace(/[ـ\-_\/]/g, " ").replace(/\s+/g, " ").trim();
+  const normalized = originalName.toLowerCase().replace(/[ـ_-]/g, " ").replace(/\s+/g, " ").trim();
   const jawwalPay = /جوال\s*بي+|jawwal\s*pay|jawwalpay/i.test(normalized);
   const walletWords = ["محفظة", "wallet"];
   const isWallet = walletWords.some(word => normalized.includes(word));
@@ -311,7 +316,7 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC }: { onBack: 
   const [databaseFile, setDatabaseFile] = useState<File | null>(null);
   const [databaseHeaders, setDatabaseHeaders] = useState<string[]>([]);
   const [databaseRows, setDatabaseRows] = useState<Record<string, unknown>[]>([]);
-  const [databaseMap, setDatabaseMap] = useState({ name: "", amount: "" });
+  const [databaseMap, setDatabaseMap] = useState({ name: "", amount: "", userId: "", registrationTime: "", customerNumber: "", invoiceNumber: "" });
   const [invoiceFiles, setInvoiceFiles] = useState<Record<string, File | null>>({ bank: null, wallet: null, visa: null });
   const [invoiceHeaders, setInvoiceHeaders] = useState<Record<string, string[]>>({ bank: [], wallet: [], visa: [] });
   const [invoiceRows, setInvoiceRows] = useState<Record<string, Record<string, unknown>[]>>({ bank: [], wallet: [], visa: [] });
@@ -335,7 +340,14 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC }: { onBack: 
     try {
       const parsed = parseSheet(await readFileBuf(file));
       setDatabaseHeaders(parsed.headers); setDatabaseRows(parsed.rows);
-      setDatabaseMap({ name: autoDetect(parsed.headers, ["اسم الزبون", "اسم العميل", "customer", "client", "name", "اسم"]), amount: autoDetect(parsed.headers, ["مدفوع بالكارد", "مدفوع بالكرت", "card paid", "card payment"]) || autoDetect(parsed.headers, HINTS.debit) || autoDetect(parsed.headers, ["amount", "مبلغ"]) });
+      setDatabaseMap({
+        name: autoDetect(parsed.headers, ["اسم الزبون", "اسم العميل", "customer", "client", "name", "اسم"]),
+        amount: autoDetect(parsed.headers, ["مدفوع بالكارد", "مدفوع بالكرت", "card paid", "card payment"]) || autoDetect(parsed.headers, HINTS.debit) || autoDetect(parsed.headers, ["amount", "مبلغ"]),
+        userId: autoDetect(parsed.headers, ["user", "userid", "user id", "مستخدم", "رقم المستخدم", "كاشير"]),
+        registrationTime: autoDetect(parsed.headers, ["الساعة", "وقت التسجيل", "وقت الفاتورة", "time", "timestamp"]),
+        customerNumber: autoDetect(parsed.headers, ["رقم الزبون", "رقم العميل", "customer number", "customer id", "client id"]),
+        invoiceNumber: autoDetect(parsed.headers, ["رقم الفاتورة", "رقم الفاتوره", "invoice number", "invoice no", "invoice id"])
+      });
     } catch (e) { setError((e as Error).message); }
   };
 
@@ -374,7 +386,16 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC }: { onBack: 
         const issue = match ? "" : sameName.length ? `الاسم موجود، لكن المبلغ مختلف (المطلوب: ${fmtNum(amount)}؛ المتاح: ${sameName.map(item => fmtNum(parseStageAAmount(item.row[databaseMap.amount]))).join("، ")})` : "الاسم غير موجود في قاعدة البيانات";
         const sourceLabel = source === "bank" ? "بنك فلسطين" : source === "wallet" ? "محفظة تجارية" : "فيزا";
         const classification = classifyStageAInvoice(originalName, sourceLabel);
-        output.push({ id: index, source: sourceLabel, name, originalName, amount, databaseName: databaseCandidate ? String(databaseCandidate.row[databaseMap.name] ?? "") : "", databaseAmount: databaseCandidate ? parseStageAAmount(databaseCandidate.row[databaseMap.amount]) : 0, accountType: String(map.accountType ? invoice[map.accountType] : "").trim(), invoice, matched: !!match, issue, ...classification });
+        output.push({
+          id: index, source: sourceLabel, name, originalName, amount,
+          databaseName: databaseCandidate ? String(databaseCandidate.row[databaseMap.name] ?? "") : "",
+          databaseAmount: databaseCandidate ? parseStageAAmount(databaseCandidate.row[databaseMap.amount]) : 0,
+          userId: databaseCandidate ? String(databaseCandidate.row[databaseMap.userId] ?? "") : "",
+          registrationTime: databaseCandidate ? String(databaseCandidate.row[databaseMap.registrationTime] ?? "") : "",
+          customerNumber: databaseCandidate ? String(databaseCandidate.row[databaseMap.customerNumber] ?? "") : "",
+          invoiceNumber: databaseCandidate ? String(databaseCandidate.row[databaseMap.invoiceNumber] ?? "") : "",
+          accountType: String(map.accountType ? invoice[map.accountType] : "").trim(), invoice, matched: !!match, issue, ...classification
+        });
       });
     });
     setResults(output);
@@ -384,8 +405,8 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC }: { onBack: 
   const exportStageA = () => {
     if (!results.length) return;
     const workbook = XLSX.utils.book_new();
-    const rows = results.map(result => [result.source, result.category, result.originalName, result.databaseName, result.amount, result.databaseAmount || "", result.accountType, result.matched ? "مطابق" : "غير مطابق", result.categoryIssue || result.issue]);
-    const worksheet = XLSX.utils.aoa_to_sheet([["المصدر الأصلي", "التصنيف", "البيان الأصلي", "البيان من قاعدة البيانات", "المبلغ", "مبلغ قاعدة البيانات", "نوع الحساب من ملف الفواتير", "حالة المطابقة", "المشكلة / التصحيح المطلوب"], ...rows]);
+    const rows = results.map(result => [result.source, result.category, result.originalName, result.databaseName, result.amount, result.databaseAmount || "", result.userId, result.registrationTime, result.customerNumber, result.invoiceNumber, result.accountType, result.matched ? "مطابق" : "غير مطابق", result.categoryIssue || result.issue]);
+    const worksheet = XLSX.utils.aoa_to_sheet([["المصدر الأصلي", "التصنيف", "البيان الأصلي", "البيان من قاعدة البيانات", "المبلغ", "مبلغ قاعدة البيانات", "رقم المستخدم", "الساعة", "رقم الزبون", "رقم الفاتورة", "نوع الحساب من ملف الفواتير", "حالة المطابقة", "المشكلة / التصحيح المطلوب"], ...rows]);
     worksheet["!cols"] = [{ wch: 18 }, { wch: 14 }, { wch: 32 }, { wch: 28 }, { wch: 14 }, { wch: 20 }, { wch: 22 }, { wch: 16 }, { wch: 48 }];
     XLSX.utils.book_append_sheet(workbook, worksheet, "نتائج المرحلة A");
     XLSX.writeFile(workbook, "نتائج_المرحلة_A_ومشاكل_اخرى.xlsx");
@@ -415,7 +436,7 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC }: { onBack: 
   const pagedActionResults = allActionResults.slice((Math.min(stageAPage, Math.max(1, Math.ceil(allActionResults.length / 50))) - 1) * 50, Math.min(stageAPage, Math.max(1, Math.ceil(allActionResults.length / 50))) * 50);
     const stageAFilterBar = results.length > 0 && <div className="flex flex-row-reverse flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white p-3"><input value={resultNameSearch} onChange={event => { setResultNameSearch(event.target.value); setStageAPage(1); }} placeholder="بحث برقم الفاتورة أو العميل أو المرجع..." className="order-1 min-w-[240px] flex-1 rounded-lg border border-slate-200 px-4 py-3 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100" /><select value={stageASourceFilter} onChange={event => { setStageASourceFilter(event.target.value); setStageAPage(1); }} className="order-2 rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm outline-none"><option value="all">كل الوسائل</option><option value="بنك فلسطين">بنك فلسطين</option><option value="محفظة تجارية">محفظة تجارية</option><option value="محفظة محمود">محفظة محمود</option><option value="جوال بي">جوال بي</option><option value="فيزا">فيزا</option></select><button onClick={() => setSelectedResultIds(new Set(visibleActionResults.map(result => resultKey(result))))} className="order-3 rounded-lg border border-slate-200 bg-white px-5 py-3 text-sm font-medium hover:bg-slate-50">تحديد الكل</button></div>;
     const inlineResultActions = results.length > 0 && <div className="space-y-2 rounded-xl border border-slate-200 bg-white p-3"><div className="flex items-center justify-between"><strong className="text-xs">خيارات الفواتير</strong><span className="text-xs text-slate-500">حدد الفاتورة لإظهار خياراتها</span></div>{pagedActionResults.map(result => <div key={`inline-${resultKey(result)}`} className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-100 bg-slate-50 p-2"><input type="checkbox" checked={selectedResultIds.has(resultKey(result))} onChange={() => toggleResultSelection(result)} /><span className="min-w-48 flex-1 text-xs font-medium">{result.originalName}<span className="mr-2 text-slate-500">{fmtNum(result.amount)}</span></span>{selectedResultIds.has(resultKey(result)) && <><button onClick={() => updateResultStatus(result, true)} className="rounded border border-green-200 bg-green-50 px-2 py-1 text-[10px] text-green-700">اعتماد</button><button onClick={() => updateResultStatus(result, false)} className="rounded border border-red-200 bg-red-50 px-2 py-1 text-[10px] text-red-700">رفض</button><select onChange={event => replaceMatchedDatabase(result, event.target.value)} defaultValue="-1" className="max-w-40 rounded border bg-white px-2 py-1 text-[10px]"><option value="-1">تغيير إلى شخص آخر</option>{databaseRows.map((row, index) => <option key={index} value={index}>{String(row[databaseMap.name] ?? "")} · {String(row[databaseMap.amount] ?? "")}</option>)}</select><button onClick={() => { if (window.confirm("حذف الفاتورة وسجلها من النتائج؟")) deleteMatchedPair(result); }} className="rounded border border-slate-300 bg-slate-100 px-2 py-1 text-[10px] text-slate-700">حذف الاثنين</button></>}</div>)}</div>;
-  const stageAPageSize = 50;
+  const stageAPageSize = 20;
   const totalStageAPages = Math.max(1, Math.ceil(allActionResults.length / stageAPageSize));
   const currentStageAPage = Math.min(stageAPage, totalStageAPages);
   const visibleActionResults = allActionResults.slice((currentStageAPage - 1) * stageAPageSize, currentStageAPage * stageAPageSize);
@@ -431,7 +452,16 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC }: { onBack: 
   const replaceMatchedDatabase = (result: StageAResult, value: string) => {
     const row = databaseRows[Number(value)];
     if (!row) return;
-    setResults(previous => previous.map(item => item === result ? { ...item, databaseName: String(row[databaseMap.name] ?? ""), databaseAmount: Number.parseFloat(String(row[databaseMap.amount] ?? "").replace(/,/g, "")) || 0, matched: true, issue: "تم تعديل سجل قاعدة البيانات يدوياً" } : item));
+    setResults(previous => previous.map(item => item === result ? {
+      ...item,
+      databaseName: String(row[databaseMap.name] ?? ""),
+      databaseAmount: Number.parseFloat(String(row[databaseMap.amount] ?? "").replace(/,/g, "")) || 0,
+      userId: String(row[databaseMap.userId] ?? ""),
+      registrationTime: String(row[databaseMap.registrationTime] ?? ""),
+      customerNumber: String(row[databaseMap.customerNumber] ?? ""),
+      invoiceNumber: String(row[databaseMap.invoiceNumber] ?? ""),
+      matched: true, issue: "تم تعديل سجل قاعدة البيانات يدوياً"
+    } : item));
   };
 
   const replacementRows = databaseRows.filter(row => {
@@ -452,91 +482,605 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC }: { onBack: 
   );
 
   return <div dir="rtl" className="min-h-screen bg-slate-50 p-6 text-slate-900"><div className="mx-auto max-w-6xl space-y-5">
-    <div className="flex flex-wrap items-center justify-between gap-3"><button onClick={onBack} className="flex items-center gap-1 text-sm text-slate-500 hover:text-blue-600"><ChevronLeft className="h-4 w-4" />العودة لمنصة الفيزا</button><h1 className="text-xl font-black">A — فرز الفواتير حسب قاعدة البيانات</h1><div className="flex gap-2"><button onClick={runStageA} className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"><Sparkles className="h-4 w-4" />تشغيل الفرز</button>{results.length > 0 && <button onClick={exportStageA} className="flex items-center gap-2 rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700"><Download className="h-4 w-4" />تصدير Excel</button>}</div></div>
+    <div className="flex flex-wrap items-center justify-between gap-3"><button onClick={onBack} className="flex items-center gap-1 text-sm text-slate-500 hover:text-blue-600"><ChevronLeft className="h-4 w-4" />العودة للمنصة الرئيسية</button><div className="flex items-center gap-3"><span className="flex h-12 w-12 items-center justify-center rounded-xl bg-blue-600 text-2xl font-black text-white shadow-sm">A</span><div><h1 className="text-2xl font-black text-blue-700">فرز الفواتير حسب قاعدة البيانات</h1><p className="mt-1 text-sm text-slate-500">مطابقة الاسم والمبلغ مع قاعدة البيانات، ثم استخراج المطابقات ومشاكل أخرى.</p></div></div><div className="flex gap-2"><button onClick={runStageA} className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"><Sparkles className="h-4 w-4" />تشغيل الفرز</button>{results.length > 0 && <button onClick={exportStageA} className="flex items-center gap-2 rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700"><Download className="h-4 w-4" />تصدير Excel</button>}</div></div>
     <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">تتم المطابقة بالاسم والمبلغ معاً. كل صف في قاعدة البيانات يُستهلك مرة واحدة، لذلك يمكن معالجة فاتورتين للاسم نفسه بمبلغين مختلفين بشكل صحيح. تتم إزالة عبارة <strong>بطاقة ائتمان /</strong> فقط، وتبقى النجمة والشرطة والرقم كما هي.</div>
     {error && <div className="rounded-lg bg-red-100 p-3 text-sm text-red-800">{error}</div>}{stageAFilterBar}
-    <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4"><h2 className="text-sm font-bold">ملف قاعدة البيانات</h2><DropZone file={databaseFile} onFile={loadDatabase} onClear={() => { setDatabaseFile(null); setDatabaseHeaders([]); setDatabaseRows([]); }} />{!!databaseHeaders.length && <div className="grid grid-cols-1 gap-2 sm:grid-cols-2"><Sel label="اسم الزبون (البيان من قاعدة البيانات)" headers={databaseHeaders} value={databaseMap.name} onChange={value => setDatabaseMap(prev => ({ ...prev, name: value }))} /><Sel label="مدفوع بالكارد (مبلغ قاعدة البيانات)" headers={databaseHeaders} value={databaseMap.amount} onChange={value => setDatabaseMap(prev => ({ ...prev, amount: value }))} /></div>}</div>
+    <div className="space-y-3 rounded-2xl border border-blue-100 bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><h2 className="text-base font-bold text-slate-800">ملف قاعدة البيانات</h2><span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">المصدر الأساسي للفرز</span></div><DropZone file={databaseFile} onFile={loadDatabase} onClear={() => { setDatabaseFile(null); setDatabaseHeaders([]); setDatabaseRows([]); }} />{!!databaseHeaders.length && <div className="grid grid-cols-1 gap-2 sm:grid-cols-3"><Sel label="اسم الزبون (البيان من قاعدة البيانات)" headers={databaseHeaders} value={databaseMap.name} onChange={value => setDatabaseMap(prev => ({ ...prev, name: value }))} /><Sel label="مدفوع بالكارد (مبلغ قاعدة البيانات)" headers={databaseHeaders} value={databaseMap.amount} onChange={value => setDatabaseMap(prev => ({ ...prev, amount: value }))} /><Sel label="رقم المستخدم" headers={databaseHeaders} value={databaseMap.userId} onChange={value => setDatabaseMap(prev => ({ ...prev, userId: value }))} /><Sel label="الساعة" headers={databaseHeaders} value={databaseMap.registrationTime} onChange={value => setDatabaseMap(prev => ({ ...prev, registrationTime: value }))} /><Sel label="رقم الزبون" headers={databaseHeaders} value={databaseMap.customerNumber} onChange={value => setDatabaseMap(prev => ({ ...prev, customerNumber: value }))} /><Sel label="رقم الفاتورة" headers={databaseHeaders} value={databaseMap.invoiceNumber} onChange={value => setDatabaseMap(prev => ({ ...prev, invoiceNumber: value }))} /></div>}</div>
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">{renderInvoice("bank", "ملف فواتير بنك فلسطين")}{renderInvoice("wallet", "ملف فواتير المحفظة التجارية")}{renderInvoice("visa", "ملف فواتير الفيزا")}</div>
     {inlineResultActions}{paginationControls}
     {!!results.length && <div className="overflow-hidden rounded-xl border border-slate-200 bg-white"><div className="flex flex-wrap items-center justify-between gap-3 border-b bg-slate-50 px-4 py-3 text-sm"><div className="flex flex-wrap items-center gap-1"><strong className="ml-3">نتائج الفرز</strong>{([ ["all", "الكل"], ["matched", "المطابق"], ["unmatched", "غير المطابق"], ["wallet", "محفظة"], ["visa", "فيزا"] ] as const).map(([value, label]) => <button key={value} onClick={() => setResultFilter(value)} className={`rounded-lg px-2.5 py-1.5 text-xs ${resultFilter === value ? "bg-blue-600 text-white" : "bg-white text-slate-600 hover:bg-blue-50"}`}>{label}</button>)}</div><div className="flex items-center gap-2"><span className="text-xs text-slate-500">مطابق: {results.filter(result => result.matched).length} · غير مطابق: {results.filter(result => !result.matched).length} · محفظة: {results.filter(result => result.category === "محفظة").length} · فيزا: {results.filter(result => result.category === "فيزا").length}</span>{results.some(result => result.matched) && <button onClick={() => onTransferToB(results.filter(result => result.matched))} className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700">ترحيل المطابق إلى B ←</button>}{results.some(result => result.category === "فيزا") && <button onClick={() => onTransferVisaToC(results.filter(result => result.category === "فيزا"))} className="rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700">ترحيل كل الفيزا إلى C ←</button>}</div></div><div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-slate-100 text-xs"><tr><th className="p-3 text-right">المصدر الأصلي</th><th className="p-3 text-right">التصنيف</th><th className="p-3 text-right">البيان الأصلي</th><th className="p-3 text-right">اسم الزبون من قاعدة البيانات</th><th className="p-3 text-right">مبلغ الفاتورة</th><th className="p-3 text-right">مدفوع بالكارد من قاعدة البيانات</th><th className="p-3 text-right">نوع الحساب</th><th className="p-3 text-right">الحالة</th><th className="p-3 text-right">ملاحظة</th></tr></thead><tbody>{results.filter(result => resultFilter === "all" || (resultFilter === "matched" ? result.matched : resultFilter === "unmatched" ? !result.matched : result.category === (resultFilter === "wallet" ? "محفظة" : "فيزا"))).map(result => <tr key={`${result.source}-${result.id}`} className={`border-t ${result.matched ? "bg-green-50/30" : "bg-red-50/30"}`}><td className="p-3">{result.source}</td><td className="p-3 font-semibold"><span className={result.category === "فيزا" ? "text-amber-700" : "text-emerald-700"}>{result.category}</span>{result.categoryIssue && <div className="text-[10px] font-normal text-orange-700">{result.categoryIssue}</div>}</td><td className="p-3 font-medium">{result.originalName}</td><td className="p-3">{result.databaseName || "—"}</td><td className="p-3 font-mono">{fmtNum(result.amount)}</td><td className="p-3 font-mono">{result.databaseName ? fmtNum(result.databaseAmount) : "—"}</td><td className="p-3">{result.accountType || "—"}</td><td className={`p-3 font-semibold ${result.matched ? "text-green-700" : "text-red-700"}`}>{result.matched ? "مطابق" : "غير مطابق"}</td><td className="p-3 text-xs text-orange-700">{result.categoryIssue || result.issue || "—"}</td></tr>)}</tbody></table></div></div>}
   </div></div>;
 }
 
-function StageBPlatform({ invoices, onBack }: { invoices: StageAResult[]; onBack: () => void }) {
-  const [files, setFiles] = useState<Record<string, File | null>>({ bank: null, wallet: null });
-  const [headers, setHeaders] = useState<Record<string, string[]>>({ bank: [], wallet: [] });
-  const [rows, setRows] = useState<Record<string, Record<string, unknown>[]>>({ bank: [], wallet: [] });
-  const [maps, setMaps] = useState<Record<string, { name: string; amount: string; accountType: string }>>({ bank: { name: "", amount: "", accountType: "" }, wallet: { name: "", amount: "", accountType: "" } });
-  const [results, setResults] = useState<Array<StageAResult & { matchedTransfer: boolean; transferType: string }>>([]);
+interface StageBInvoice {
+  id: string;
+  name: string;
+  originalName: string;
+  amount: number;
+  paidAmount: number;
+  accountType: string;
+  userId: string;
+  registrationTime: string;
+  customerNumber: string;
+  invoiceNumber: string;
+  date: string;
+  source: string;
+  raw: Record<string, unknown>;
+}
+
+interface StageBTransfer {
+  id: string;
+  name: string;
+  description: string;
+  amount: number;
+  receivedAmount: number;
+  accountType: string;
+  type: "بنك فلسطين" | "محفظة تجارية";
+  date: string;
+  raw: Record<string, unknown>;
+}
+
+interface StageBMatch {
+  id: string;
+  invoice: StageBInvoice;
+  transfer?: StageBTransfer;
+  score: number;
+  status: "pending" | "confirmed" | "rejected" | "held" | "heldInvoice" | "heldTransfer" | "visa" | "difference";
+  reason: string;
+}
+
+function stageBNameParts(value: string): string[][] {
+  const cleaned = value
+    .replace(/pacs008|wallet|ct|ils|usd|eur/gi, " ")
+    .replace(/\d+/g, " ")
+    .replace(/[|_*:;,()[\]{}]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned.split("/").map(part => normName(part).split(" ").filter(Boolean)).filter(Boolean);
+}
+
+function stageBNameKey(value: string): string {
+  const parts = stageBNameParts(value);
+  const names = parts[0] || [];
+  return names.length >= 2 ? `${names[0]} ${names[names.length - 1]}` : names.join(" ");
+}
+
+function stageBNameMatch(invoiceName: string, transferName: string, aliases: Record<string, string>): number {
+  const invoiceKey = stageBNameKey(invoiceName);
+  const aliasKey = aliases[invoiceKey];
+  const segments = stageBNameParts(transferName);
+  if (aliasKey && segments.some(segment => stageBNameKey(segment.join(" ")) === aliasKey)) return 1;
+  const invoiceParts = stageBNameParts(invoiceName);
+  return segments.reduce((best, segment) => {
+    const candidate = segment.length >= 2 ? `${segment[0]} ${segment[segment.length - 1]}` : segment.join(" ");
+    return Math.max(best, nameSim(invoiceParts[0]?.join(" ") || "", candidate));
+  }, 0);
+}
+
+function stageBAccountType(invoice: StageBInvoice): string {
+  return invoice.accountType || (invoice.source.includes("بنك") ? "بنك فلسطين" : invoice.source.includes("محفظة") ? "محفظة تجارية" : "");
+}
+
+function stageBTransferAccountType(transfer: StageBTransfer): string {
+  return transfer.accountType || transfer.type;
+}
+
+function StageBPlatform({ invoices, onBack, onTransferVisaToC }: { invoices: StageAResult[]; onBack: () => void; onTransferVisaToC: (results: StageAResult[]) => void }) {
+  const emptyMap = useMemo(() => ({ name: "", amount: "", paidAmount: "", receivedAmount: "", accountType: "", userId: "", date: "" }), []);
+  const [files, setFiles] = useState<Record<string, File | null>>({ invoiceBank: null, transferBank: null, invoiceWallet: null, transferWallet: null });
+  const [headers, setHeaders] = useState<Record<string, string[]>>({ invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [] });
+  const [rows, setRows] = useState<Record<string, Record<string, unknown>[]>>({ invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [] });
+  const [maps, setMaps] = useState<Record<string, typeof emptyMap>>({ invoiceBank: emptyMap, transferBank: emptyMap, invoiceWallet: emptyMap, transferWallet: emptyMap });
+  const [matches, setMatches] = useState<StageBMatch[]>([]);
+  const [aliases, setAliases] = useState<Record<string, string>>({});
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [invoiceSearch, setInvoiceSearch] = useState("");
+  const [transferSearch, setTransferSearch] = useState("");
+  const [drawerMatchId, setDrawerMatchId] = useState<string | null>(null);
+  const [drawerInvoiceSearch, setDrawerInvoiceSearch] = useState("");
+  const [drawerTransferSearch, setDrawerTransferSearch] = useState("");
+  const [drawerMinAmount, setDrawerMinAmount] = useState("");
+  const [drawerMaxAmount, setDrawerMaxAmount] = useState("");
+  const [drawerMode, setDrawerMode] = useState<"invoice" | "transfer">("transfer");
+  const [stageBView, setStageBView] = useState<"pending" | "confirmed" | "manual">("pending");
+  const rowRefs = useRef<Record<string, HTMLTableRowElement | null>>({});
+  const [detailMatchId, setDetailMatchId] = useState<string | null>(null);
+  const undoStack = useRef<StageBMatch[][]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [stageBPage, setStageBPage] = useState(1);
+  const [showSettings, setShowSettings] = useState(false);
+  const [amountTolerancePercent, setAmountTolerancePercent] = useState(0.5);
+  const [stageBAccountFilter, setStageBAccountFilter] = useState("all");
+  const [stageBAmountSort, setStageBAmountSort] = useState<"none" | "asc" | "desc">("none");
+  const sessionFileRef = useRef<HTMLInputElement>(null);
+  const hasTransferredInvoices = invoices.some(invoice => invoice.category !== "فيزا");
+
+  useEffect(() => {
+    storageGet<Record<string, string>>("stage_b_aliases", {}).then(setAliases);
+    storageGet<any>("stage_b_session", null).then(session => {
+      if (!session) return;
+      setHeaders(session.headers || { invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [] });
+      setRows(session.rows || { invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [] });
+      setMaps(session.maps || { invoiceBank: emptyMap, transferBank: emptyMap, invoiceWallet: emptyMap, transferWallet: emptyMap });
+      setMatches(session.matches || []);
+      setAmountTolerancePercent(session.amountTolerancePercent ?? 0.5);
+    });
+  }, [emptyMap]);
+
   const parseAmount = (value: unknown) => Number.parseFloat(String(value ?? "").replace(/[٫٬]/g, match => match === "٫" ? "." : "").replace(/,/g, "")) || 0;
-  const loadTransfer = async (source: "bank" | "wallet", file: File) => {
+  const loadFile = async (source: "invoiceBank" | "transferBank" | "invoiceWallet" | "transferWallet", file: File) => {
     try {
       const parsed = parseSheet(await readFileBuf(file));
-      setFiles(prev => ({ ...prev, [source]: file })); setHeaders(prev => ({ ...prev, [source]: parsed.headers })); setRows(prev => ({ ...prev, [source]: parsed.rows }));
-      setMaps(prev => ({ ...prev, [source]: { name: autoDetect(parsed.headers, HINTS.name), amount: detectCardPaidColumn(parsed.headers) || autoDetect(parsed.headers, HINTS.debit) || autoDetect(parsed.headers, ["amount", "مبلغ"]), accountType: autoDetect(parsed.headers, HINTS.accountType) } }));
+      setFiles(prev => ({ ...prev, [source]: file }));
+      setHeaders(prev => ({ ...prev, [source]: parsed.headers }));
+      setRows(prev => ({ ...prev, [source]: parsed.rows }));
+      setMaps(prev => ({ ...prev, [source]: {
+        name: autoDetect(parsed.headers, HINTS.name),
+        amount: detectCardPaidColumn(parsed.headers) || autoDetect(parsed.headers, HINTS.debit) || autoDetect(parsed.headers, ["amount", "مبلغ"]),
+        paidAmount: detectCardPaidColumn(parsed.headers) || autoDetect(parsed.headers, ["paid", "مدفوع", "المبلغ المدفوع"]) || autoDetect(parsed.headers, HINTS.debit),
+        receivedAmount: autoDetect(parsed.headers, ["received", "مستلم", "المبلغ المستلم"]) || autoDetect(parsed.headers, HINTS.credit),
+        accountType: autoDetect(parsed.headers, HINTS.accountType),
+        userId: "",
+        date: autoDetect(parsed.headers, HINTS.date)
+      } }));
       setError(null);
     } catch (e) { setError((e as Error).message); }
   };
-  const runStageB = () => {
-    if (!invoices.length) { setError("لا توجد فواتير مرحلة من A. نفّذ المرحلة A ثم رحّل المطابقات."); return; }
-    const available = (["bank", "wallet"] as const).flatMap(source => rows[source].map((row, index) => ({ source, row, index, used: false })));
-    const output = invoices.map((invoice, index) => {
-      const match = available.find(item => !item.used && stageANameKey(String(item.row[maps[item.source].name])) === stageANameKey(invoice.name) && Math.abs(parseAmount(item.row[maps[item.source].amount]) - invoice.amount) <= 0.01);
-      if (match) match.used = true;
-      return { ...invoice, matchedTransfer: !!match, transferType: match ? (match.source === "bank" ? "بنك فلسطين" : "محفظة تجارية") : "مطابقة ليوم الغد" , id: index };
+
+  const invoiceData = useMemo<StageBInvoice[]>(() => {
+    const sources = (["invoiceBank", "invoiceWallet"] as const).flatMap(source => {
+      return rows[source].map((row, index) => ({
+        id: `${source}-${index}`, name: String(row[maps[source].name] ?? "").trim(),
+        originalName: String(row[maps[source].name] ?? "").trim(), amount: parseAmount(row[maps[source].paidAmount] || row[maps[source].amount]),
+        paidAmount: parseAmount(row[maps[source].paidAmount] || row[maps[source].amount]),
+        accountType: source === "invoiceBank" ? "بنك فلسطين" : "محفظة تجارية", userId: "",
+        registrationTime: "", customerNumber: "", invoiceNumber: "",
+        date: String(row[maps[source].date] ?? "").trim(), source: source === "invoiceBank" ? "فاتورة بنك فلسطين" : "فاتورة محفظة تجارية", raw: row
+      })).filter(row => row.name || row.amount);
     });
-    setResults(output); setError(null);
+    if (sources.length) return sources;
+    return invoices.filter(invoice => invoice.category !== "فيزا").map((invoice, index) => ({
+      id: `stage-a-${invoice.id}-${index}`, name: invoice.name, originalName: invoice.originalName,
+      amount: invoice.amount, accountType: invoice.accountType, userId: invoice.userId,
+      paidAmount: invoice.amount,
+      registrationTime: invoice.registrationTime, customerNumber: invoice.customerNumber, invoiceNumber: invoice.invoiceNumber,
+      date: "", source: invoice.category, raw: invoice.invoice
+    }));
+  }, [rows, maps, invoices]);
+
+  const transferData = useMemo<StageBTransfer[]>(() => (["transferBank", "transferWallet"] as const).flatMap(source =>
+    rows[source].map((row, index) => ({
+      id: `${source}-${index}`, name: String(row[maps[source].name] ?? "").trim(),
+      description: String(row[maps[source].name] ?? "").trim(), amount: parseAmount(row[maps[source].receivedAmount] || row[maps[source].amount]),
+      receivedAmount: parseAmount(row[maps[source].receivedAmount] || row[maps[source].amount]),
+      accountType: source === "transferBank" ? "بنك فلسطين" : "محفظة تجارية",
+      type: (source === "transferBank" ? "بنك فلسطين" : "محفظة تجارية") as StageBTransfer["type"],
+      date: String(row[maps[source].date] ?? "").trim(), raw: row
+    })).filter(row => row.name || row.amount)
+  ), [rows, maps]);
+
+  const runStageB = () => {
+    if (!invoiceData.length) { setError(invoices.length ? "لا توجد فواتير مرحلة من قاعدة البيانات." : "ارفع ملفي فواتير بنك فلسطين والمحفظة التجارية."); return; }
+    if (!transferData.length) { setError("ارفع حوالات بنك فلسطين وحوالات المحفظة التجارية."); return; }
+    const used = new Set<string>();
+    const output = invoiceData.map(invoice => {
+      const candidates = transferData
+        .filter(transfer => !used.has(transfer.id))
+        .map(transfer => {
+          const amountDiff = Math.abs(transfer.receivedAmount - invoice.paidAmount);
+          const nameScore = stageBNameMatch(invoice.name, transfer.description, aliases);
+          const accountDiff = stageBAccountType(invoice) && stageBTransferAccountType(transfer) && normName(stageBAccountType(invoice)) !== normName(stageBTransferAccountType(transfer));
+          const score = nameScore * 70 + (amountDiff <= 0.01 ? 30 : amountDiff <= Math.max(0.01, invoice.amount * 0.005) ? 20 : 0);
+          return { transfer, score, amountDiff, accountDiff };
+        })
+        .filter(candidate => candidate.amountDiff <= Math.max(0.01, invoice.amount * (amountTolerancePercent / 100)))
+        .sort((a, b) => b.score - a.score)[0];
+      if (!candidates) return { id: `m-${invoice.id}`, invoice, score: 0, status: "held", reason: "لم توجد حوالة مناسبة" } satisfies StageBMatch;
+      used.add(candidates.transfer.id);
+      const status = candidates.amountDiff > 0.01 || candidates.accountDiff ? "difference" : candidates.score >= 90 ? "pending" : "held";
+      const reasons = [
+        stageBNameMatch(invoice.name, candidates.transfer.description, aliases) < 0.5 ? "اختلاف اسم يحتاج مراجعة" : "",
+        candidates.accountDiff ? `فرق نوع الحساب: ${stageBAccountType(invoice)} مقابل ${stageBTransferAccountType(candidates.transfer)}` : "",
+        candidates.amountDiff > 0.01 ? `فرق مبلغ: الحوالة ${candidates.transfer.receivedAmount > invoice.paidAmount ? "أكثر" : "أقل"} بـ ${fmtNum(candidates.amountDiff)} شيكل` : ""
+      ].filter(Boolean);
+      return { id: `m-${invoice.id}-${candidates.transfer.id}`, invoice, transfer: candidates.transfer, score: Math.round(candidates.score), status, reason: reasons.join("؛ ") || "مطابقة اسم ومبلغ" } satisfies StageBMatch;
+    });
+    setMatches(output);
+    setSelected(new Set());
+    setStageBPage(1);
+    setStageBView("pending");
+    setError(null);
   };
+
+  const updateStatus = (ids: Set<string>, status: StageBMatch["status"]) => setMatches(prev => {
+    undoStack.current.push(prev);
+    return prev.map(match => ids.has(match.id) ? { ...match, status } : match);
+  });
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setDrawerMatchId(null);
+        setDetailMatchId(null);
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        const previous = undoStack.current.pop();
+        if (previous) setMatches(previous);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+  const replaceTransfer = (match: StageBMatch, transfer: StageBTransfer) => {
+    setMatches(prev => {
+      undoStack.current.push(prev);
+      return prev.map(item => item.id === match.id ? {
+      ...item, transfer, status: Math.abs(transfer.receivedAmount - item.invoice.paidAmount) > 0.01 || normName(stageBAccountType(item.invoice)) !== normName(stageBTransferAccountType(transfer)) ? "difference" : "pending",
+      score: Math.round(stageBNameMatch(item.invoice.name, transfer.description, aliases) * 70 + (Math.abs(transfer.receivedAmount - item.invoice.paidAmount) <= 0.01 ? 30 : 0)),
+      reason: "تم اختيار حوالة بديلة يدوياً"
+      } : item);
+    });
+    setDrawerMatchId(null);
+  };
+  const replaceInvoice = (match: StageBMatch, invoice: StageBInvoice) => {
+    setMatches(prev => {
+      undoStack.current.push(prev);
+      return prev.map(item => item.id === match.id ? {
+      ...item, invoice, status: item.transfer && (Math.abs(item.transfer.receivedAmount - invoice.paidAmount) > 0.01 || normName(stageBAccountType(invoice)) !== normName(stageBTransferAccountType(item.transfer))) ? "difference" : "pending",
+      score: item.transfer ? Math.round(stageBNameMatch(invoice.name, item.transfer.description, aliases) * 70 + (Math.abs(item.transfer.receivedAmount - invoice.paidAmount) <= 0.01 ? 30 : 0)) : 0,
+      reason: "تم اختيار فاتورة بديلة يدوياً"
+      } : item);
+    });
+    setDrawerMatchId(null);
+  };
+  const saveAliases = (items: StageBMatch[]) => {
+    const next = { ...aliases };
+    items.forEach(item => { if (item.transfer) next[stageBNameKey(item.invoice.name)] = stageBNameKey(item.transfer.name); });
+    setAliases(next);
+    void storageSet("stage_b_aliases", next);
+  };
+  const confirmSelected = () => {
+    const items = matches.filter(match => selected.has(match.id) && match.transfer);
+    if (!items.length) return;
+    updateStatus(new Set(items.map(item => item.id)), "confirmed");
+    saveAliases(items);
+    setSelected(new Set());
+  };
+  const visibleMatches = matches.filter(match => {
+    const invoiceHit = !invoiceSearch.trim() || `${match.invoice.name} ${match.invoice.userId}`.toLowerCase().includes(invoiceSearch.trim().toLowerCase());
+    const transferHit = !transferSearch.trim() || match.transfer?.description.toLowerCase().includes(transferSearch.trim().toLowerCase());
+    const accountHit = stageBAccountFilter === "all" || stageBAccountFilter === stageBAccountType(match.invoice) || stageBAccountFilter === (match.transfer ? stageBTransferAccountType(match.transfer) : "");
+    const viewHit = stageBView === "confirmed"
+      ? match.status === "confirmed"
+      : stageBView === "manual"
+        ? ["heldInvoice", "heldTransfer", "difference", "rejected"].includes(match.status)
+        : !["confirmed", "heldInvoice", "heldTransfer", "difference", "rejected"].includes(match.status);
+    return invoiceHit && transferHit && accountHit && viewHit;
+  }).sort((a, b) => {
+    if (stageBAmountSort === "asc") return a.invoice.paidAmount - b.invoice.paidAmount;
+    if (stageBAmountSort === "desc") return b.invoice.paidAmount - a.invoice.paidAmount;
+    return 0;
+  });
+  const stageBPageSize = 20;
+  const totalStageBPages = Math.max(1, Math.ceil(visibleMatches.length / stageBPageSize));
+  const currentStageBPage = Math.min(stageBPage, totalStageBPages);
+  const pagedMatches = visibleMatches.slice((currentStageBPage - 1) * stageBPageSize, currentStageBPage * stageBPageSize);
+  const toggleAll = () => setSelected(selected.size === pagedMatches.length ? new Set() : new Set(pagedMatches.map(match => match.id)));
+  const openReplacement = (matchId: string, mode: "invoice" | "transfer") => {
+    setDrawerMode(mode);
+    setDrawerMatchId(matchId);
+    window.setTimeout(() => rowRefs.current[matchId]?.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" }), 0);
+  };
+  const suggestionClass = (amountDiff: number, nameMatch: number) =>
+    amountDiff <= 0.01 && nameMatch >= 0.5
+      ? "border-green-300 bg-green-50 text-green-800"
+      : amountDiff <= 0.01
+        ? "border-amber-300 bg-amber-50 text-amber-800"
+        : "border-red-300 bg-red-50 text-red-800";
+
   const exportStageB = () => {
     const workbook = XLSX.utils.book_new();
-    const sheet = XLSX.utils.aoa_to_sheet([["المصدر من A", "البيان", "المبلغ", "نوع الحساب", "الحوالة المطابقة", "الحالة"], ...results.map(result => [result.source, result.originalName, result.amount, result.accountType, result.transferType, result.matchedTransfer ? "مطابق" : "مطابقة ليوم الغد"]) ]);
-    sheet["!cols"] = [{ wch: 18 }, { wch: 35 }, { wch: 14 }, { wch: 22 }, { wch: 22 }, { wch: 20 }]; XLSX.utils.book_append_sheet(workbook, sheet, "مطابقة B"); XLSX.writeFile(workbook, "مطابقة_الفواتير_مع_البنك_والمحفظة.xlsx");
+    const rowsFor = (items: StageBMatch[]) => items.map(match => [
+      match.invoice.userId, match.invoice.registrationTime, match.invoice.customerNumber, match.invoice.invoiceNumber,
+      match.invoice.name, match.invoice.amount, match.invoice.accountType || "—",
+      match.transfer?.description || "—", match.transfer?.amount ?? "", match.transfer?.accountType || "—",
+      match.transfer?.type || "—", match.transfer ? fmtNum(match.transfer.receivedAmount - match.invoice.paidAmount) : "", stageBAccountType(match.invoice) || "—",
+      match.transfer ? stageBTransferAccountType(match.transfer) : "—", match.score, match.reason
+    ]);
+    const headersOut = ["رقم المستخدم", "الساعة", "رقم الزبون", "رقم الفاتورة", "الفاتورة", "مبلغ الفاتورة", "نوع حساب الفاتورة", "الحوالة", "مبلغ الحوالة", "نوع حوالة الملف", "فرق المبلغ", "نوع الحساب الفعلي للفاتورة", "نوع الحساب الفعلي للحوالة", "الثقة", "الملاحظة"];
+    const add = (name: string, items: StageBMatch[]) => XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([headersOut, ...rowsFor(items)]), name);
+    add("المطابقة العامة", matches);
+    add("المؤكد والمطابق", matches.filter(match => match.status === "confirmed"));
+    add("المنتظر / قيد المطابقة", matches.filter(match => ["held", "heldInvoice", "heldTransfer", "rejected"].includes(match.status)));
+    add("الفيزا", matches.filter(match => match.status === "visa"));
+    add("فروقات تحتاج تدقيق", matches.filter(match => match.status === "difference"));
+    XLSX.writeFile(workbook, "مطابقة_B_الفواتير_والحوالات.xlsx");
   };
-  const renderTransfer = (source: "bank" | "wallet", label: string) => <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4"><h2 className="text-sm font-bold">{label}</h2><DropZone file={files[source]} onFile={file => loadTransfer(source, file)} onClear={() => { setFiles(prev => ({ ...prev, [source]: null })); setHeaders(prev => ({ ...prev, [source]: [] })); setRows(prev => ({ ...prev, [source]: [] })); }} />{!!headers[source].length && <div className="grid grid-cols-1 gap-2 sm:grid-cols-3"><Sel label="اسم العميل/البيان" headers={headers[source]} value={maps[source].name} onChange={value => setMaps(prev => ({ ...prev, [source]: { ...prev[source], name: value } }))} /><Sel label="المبلغ" headers={headers[source]} value={maps[source].amount} onChange={value => setMaps(prev => ({ ...prev, [source]: { ...prev[source], amount: value } }))} /><Sel label="نوع الحساب" headers={headers[source]} value={maps[source].accountType} onChange={value => setMaps(prev => ({ ...prev, [source]: { ...prev[source], accountType: value } }))} /></div>}</div>;
-  return <div dir="rtl" className="min-h-screen bg-slate-50 p-6 text-slate-900"><div className="mx-auto max-w-6xl space-y-5"><div className="flex flex-wrap items-center justify-between gap-3"><button onClick={onBack} className="flex items-center gap-1 text-sm text-slate-500 hover:text-blue-600"><ChevronLeft className="h-4 w-4" />العودة لمنصة الفيزا</button><h1 className="text-xl font-black">B — مطابقة الفواتير مع البنك والمحفظة</h1><div className="flex gap-2"><button onClick={runStageB} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700"><Sparkles className="mr-1 inline h-4 w-4" />تشغيل المطابقة</button>{results.length > 0 && <button onClick={exportStageB} className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700"><Download className="mr-1 inline h-4 w-4" />تصدير Excel</button>}</div></div><div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">تم ترحيل {invoices.length} فاتورة مؤكدة من المرحلة A. تتم مطابقة كل فاتورة مع حوالة واحدة بالاسم والمبلغ، والفواتير التي لا توجد في البنك أو المحفظة تذهب إلى قائمة مطابقة ليوم الغد.</div>{error && <div className="rounded-lg bg-red-100 p-3 text-sm text-red-800">{error}</div>}<div className="grid grid-cols-1 gap-4 md:grid-cols-2">{renderTransfer("bank", "ملف حوالات بنك فلسطين")}{renderTransfer("wallet", "ملف حوالات المحفظة التجارية")}</div>{!!results.length && <div className="overflow-hidden rounded-xl border border-slate-200 bg-white"><div className="border-b bg-slate-50 px-4 py-3 text-sm font-bold">نتائج B: مطابق {results.filter(result => result.matchedTransfer).length} · مطابقة ليوم الغد {results.filter(result => !result.matchedTransfer).length}</div><div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-slate-100 text-xs"><tr><th className="p-3 text-right">البيان</th><th className="p-3 text-right">المبلغ</th><th className="p-3 text-right">نوع الحساب</th><th className="p-3 text-right">الحوالة</th><th className="p-3 text-right">الحالة</th></tr></thead><tbody>{results.map(result => <tr key={`${result.source}-${result.id}`} className="border-t"><td className="p-3 font-medium">{result.originalName}</td><td className="p-3 font-mono">{fmtNum(result.amount)}</td><td className="p-3">{result.accountType || "—"}</td><td className="p-3">{result.transferType}</td><td className={`p-3 ${result.matchedTransfer ? "text-green-700" : "text-amber-700"}`}>{result.matchedTransfer ? "مطابق" : "مطابقة ليوم الغد"}</td></tr>)}</tbody></table></div></div>}</div></div>;
+
+  const saveStageBSession = () => {
+    void storageSet("stage_b_session", { headers, rows, maps, matches, amountTolerancePercent });
+    setError(null);
+  };
+
+  const exportStageBSession = () => {
+    const blob = new Blob([JSON.stringify({ headers, rows, maps, matches, amountTolerancePercent })], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "جلسة_المرحلة_B.json";
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const clearStageBSession = () => {
+    if (!window.confirm("مسح ملفات ونتائج المرحلة B الحالية؟")) return;
+    setFiles({ invoiceBank: null, transferBank: null, invoiceWallet: null, transferWallet: null });
+    setHeaders({ invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [] });
+    setRows({ invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [] });
+    setMaps({ invoiceBank: emptyMap, transferBank: emptyMap, invoiceWallet: emptyMap, transferWallet: emptyMap });
+    setMatches([]);
+    setSelected(new Set());
+    void storageSet("stage_b_session", null);
+  };
+
+  const importStageBSession = async (file: File) => {
+    try {
+      const session = JSON.parse(new TextDecoder().decode(await readFileBuf(file)));
+      if (!session || typeof session !== "object" || !session.rows || !session.maps) throw new Error("ملف المرحلة B غير صالح.");
+      setHeaders(session.headers || { invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [] });
+      setRows(session.rows);
+      setMaps(session.maps);
+      setMatches(session.matches || []);
+      setAmountTolerancePercent(session.amountTolerancePercent ?? 0.5);
+      setError(null);
+      void storageSet("stage_b_session", session);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const stageBStats = [
+    { label: "مؤكد", value: matches.filter(match => match.status === "confirmed").length, color: "border-blue-300 bg-blue-50 text-green-700" },
+    { label: "منتظر", value: matches.filter(match => ["pending", "held"].includes(match.status)).length, color: "border-slate-200 bg-white text-blue-700" },
+    { label: "مرفوض", value: matches.filter(match => match.status === "rejected").length, color: "border-slate-200 bg-white text-red-600" },
+    { label: "مطابقة يدوية", value: matches.filter(match => ["heldInvoice", "heldTransfer", "difference"].includes(match.status)).length, color: "border-slate-200 bg-white text-purple-700" },
+    { label: "فيزا", value: matches.filter(match => match.status === "visa").length, color: "border-slate-200 bg-white text-teal-700" },
+    { label: "فواتير", value: invoiceData.length, color: "border-slate-200 bg-white text-orange-600" },
+    { label: "حوالات", value: transferData.length, color: "border-slate-200 bg-white text-orange-600" },
+    { label: "إجمالي المطابقات", value: matches.length, color: "border-slate-200 bg-white text-slate-700" },
+  ];
+
+  const renderFile = (source: "invoiceBank" | "transferBank" | "invoiceWallet" | "transferWallet", label: string) => (
+    <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
+      <h2 className="text-sm font-bold">{label}</h2>
+      <DropZone file={files[source]} onFile={file => loadFile(source, file)} onClear={() => { setFiles(prev => ({ ...prev, [source]: null })); setHeaders(prev => ({ ...prev, [source]: [] })); setRows(prev => ({ ...prev, [source]: [] })); }} />
+      {!!headers[source].length && <div className="grid grid-cols-2 gap-2">
+        <Sel label="الاسم / البيان" headers={headers[source]} value={maps[source].name} onChange={value => setMaps(prev => ({ ...prev, [source]: { ...prev[source], name: value } }))} />
+        <Sel label="المبلغ المدفوع" headers={headers[source]} value={maps[source].paidAmount} onChange={value => setMaps(prev => ({ ...prev, [source]: { ...prev[source], paidAmount: value, amount: value } }))} />
+        <Sel label="المبلغ المستلم" headers={headers[source]} value={maps[source].receivedAmount} onChange={value => setMaps(prev => ({ ...prev, [source]: { ...prev[source], receivedAmount: value } }))} />
+        <Sel label="نوع الحساب" headers={headers[source]} value={maps[source].accountType} onChange={value => setMaps(prev => ({ ...prev, [source]: { ...prev[source], accountType: value } }))} />
+      </div>}
+    </div>
+  );
+
+  return <div dir="rtl" className="min-h-screen bg-slate-50 p-6 text-slate-900"><div className="mx-auto max-w-7xl space-y-5">
+    <div className="sticky top-2 z-20 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-white/95 p-5 shadow-sm backdrop-blur">
+      <div className="flex items-center gap-3">
+        <button onClick={onBack} className="flex items-center gap-1 text-sm text-slate-500 hover:text-blue-600"><ChevronLeft className="h-4 w-4" />العودة للمنصة الرئيسية</button>
+        <span className="hidden h-8 w-px bg-slate-200 sm:block" />
+        <div><h1 className="text-xl font-black text-slate-900">B — المطابقة الذكية للفواتير والحوالات</h1><p className="mt-1 text-xs text-slate-500">مطابقة المبالغ والأسماء بين الفواتير وحوالات بنك فلسطين والمحفظة التجارية</p></div>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <button onClick={() => setShowSettings(value => !value)} className="rounded-lg border px-3 py-2 text-xs">الإعدادات</button>
+        <button onClick={saveStageBSession} className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-700">حفظ المشروع</button>
+        <button onClick={exportStageBSession} className="rounded-lg border px-3 py-2 text-xs">تصدير المشروع</button>
+        <button onClick={() => sessionFileRef.current?.click()} className="rounded-lg border px-3 py-2 text-xs">استيراد ملف سابق</button>
+        <input ref={sessionFileRef} type="file" accept=".json,application/json" className="hidden" onChange={event => { const file = event.target.files?.[0]; if (file) void importStageBSession(file); event.target.value = ""; }} />
+        <button onClick={clearStageBSession} className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">أدوات الحذف</button>
+        <button onClick={runStageB} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white"><Sparkles className="mr-1 inline h-4 w-4" />تشغيل المطابقة</button>
+        {matches.length > 0 && <button onClick={exportStageB} className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white"><Download className="mr-1 inline h-4 w-4" />تصدير الشيتات</button>}
+      </div>
+    </div>
+    {showSettings && <div className="rounded-xl border border-blue-100 bg-blue-50/60 p-4">
+      <label className="flex items-center gap-2 text-xs">نسبة التسامح في فرق المبلغ
+        <input type="number" min="0" max="10" step="0.1" value={amountTolerancePercent} onChange={event => setAmountTolerancePercent(Math.min(10, Math.max(0, Number(event.target.value) || 0)))} className="w-20 rounded-lg border bg-white px-2 py-1.5 text-center" />%
+      </label>
+    </div>}
+    <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm leading-6 text-emerald-900 shadow-sm">تتم المطابقة على أساس المبلغ والاسم معًا. عند الترحيل من A ارفع حوالتي بنك فلسطين والمحفظة التجارية فقط، وعند العمل المستقل ارفع ملفات الفواتير والحوالات الأربعة. نوع الحساب يُحدد تلقائياً من خانة الملف.</div>
+    {!!invoices.filter(invoice => invoice.category === "فيزا").length && <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+      <div><strong>فواتير الفيزا المرحّلة من قاعدة البيانات</strong><div className="mt-1 text-xs">تم الاحتفاظ بنتيجة الفرز، وهذه الفواتير تُرحّل إلى منصة C ولا تدخل في مطابقة B.</div></div>
+      <button onClick={() => onTransferVisaToC(invoices.filter(invoice => invoice.category === "فيزا"))} className="rounded-lg bg-amber-600 px-4 py-2 text-xs font-medium text-white hover:bg-amber-700">ترحيل الفيزا إلى منصة C ({invoices.filter(invoice => invoice.category === "فيزا").length})</button>
+    </div>}
+    {error && <div className="rounded-lg bg-red-100 p-3 text-sm text-red-800">{error}</div>}
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      {hasTransferredInvoices ? <>{renderFile("transferBank", "حوالات بنك فلسطين")}{renderFile("transferWallet", "حوالات المحفظة التجارية")}</> : <>{renderFile("invoiceBank", "فواتير بنك فلسطين")}{renderFile("invoiceWallet", "فواتير المحفظة التجارية")}{renderFile("transferBank", "حوالات بنك فلسطين")}{renderFile("transferWallet", "حوالات المحفظة التجارية")}</>}
+    </div>
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
+      {stageBStats.map(stat => <div key={stat.label} className={`rounded-xl border p-3 shadow-sm ${stat.color}`}>
+        <div className="text-[11px] font-medium text-slate-600">{stat.label}</div>
+        <div className="mt-1 text-2xl font-bold">{stat.value}</div>
+      </div>)}
+    </div>
+    {!!matches.length && <div className={`stage-b-results overflow-hidden rounded-xl border bg-white ${stageBView === "confirmed" ? "stage-b-confirmed" : ""}`}>
+      <div className="flex flex-wrap items-center gap-2 border-b bg-slate-50 p-3"><div className="flex gap-1 rounded-lg bg-white p-1"><button onClick={() => { setStageBView("pending"); setStageBPage(1); }} className={`rounded px-3 py-1.5 text-xs ${stageBView === "pending" ? "bg-amber-100 text-amber-800" : "text-slate-600"}`}>المنتظر {matches.filter(match => !["confirmed", "heldInvoice", "heldTransfer", "difference", "rejected"].includes(match.status)).length}</button><button onClick={() => { setStageBView("confirmed"); setStageBPage(1); }} className={`rounded px-3 py-1.5 text-xs ${stageBView === "confirmed" ? "bg-green-100 text-green-800" : "text-slate-600"}`}>المؤكد {matches.filter(match => match.status === "confirmed").length}</button><button onClick={() => { setStageBView("manual"); setStageBPage(1); }} className={`rounded px-3 py-1.5 text-xs ${stageBView === "manual" ? "bg-blue-100 text-blue-800" : "text-slate-600"}`}>مطابقة يدوية {matches.filter(match => ["heldInvoice", "heldTransfer", "difference", "rejected"].includes(match.status)).length}</button></div><input value={invoiceSearch} onChange={event => { setInvoiceSearch(event.target.value); setStageBPage(1); }} placeholder="بحث بالاسم أو البيان أو رقم المستخدم..." className="min-w-52 flex-1 rounded-lg border px-3 py-2 text-xs" /><input value={transferSearch} onChange={event => { setTransferSearch(event.target.value); setStageBPage(1); }} placeholder="بحث في الحوالات..." className="min-w-52 flex-1 rounded-lg border px-3 py-2 text-xs" /><select value={stageBAccountFilter} onChange={event => { setStageBAccountFilter(event.target.value); setStageBPage(1); }} className="rounded-lg border bg-white px-3 py-2 text-xs"><option value="all">كل الأنواع</option><option value="بنك فلسطين">بنك فلسطين</option><option value="محفظة تجارية">محفظة تجارية</option></select><select value={stageBAmountSort} onChange={event => { setStageBAmountSort(event.target.value as "none" | "asc" | "desc"); setStageBPage(1); }} className="rounded-lg border bg-white px-3 py-2 text-xs"><option value="none">المبلغ: بدون فرز</option><option value="asc">المبلغ: الأصغر أولاً</option><option value="desc">المبلغ: الأكبر أولاً</option></select><button onClick={toggleAll} className="rounded-lg border px-3 py-2 text-xs">تحديد الكل</button><button onClick={confirmSelected} disabled={!selected.size} className="rounded-lg bg-blue-600 px-3 py-2 text-xs text-white disabled:opacity-40">حفظ المحدد ({selected.size})</button><button onClick={() => updateStatus(selected, "rejected")} disabled={!selected.size} className="rounded-lg bg-red-600 px-3 py-2 text-xs text-white disabled:opacity-40">رفض المحدد</button></div>
+      <div className="flex items-start gap-4"><div className="min-w-0 flex-1 overflow-auto"><table className="w-full min-w-[1000px] text-sm"><thead className="sticky top-0 z-10 bg-slate-100 text-xs"><tr><th className="p-3">      <input type="checkbox" checked={pagedMatches.length > 0 && pagedMatches.every(match => selected.has(match.id))} onChange={toggleAll} /></th><th className="p-3 text-right">الفاتورة / المستخدم</th><th className="p-3 text-right">المبلغ</th><th className="p-3 text-right">نوع الحساب</th><th className="p-3 text-right">الحوالة</th><th className="p-3 text-right">مبلغ الحوالة</th><th className="p-3 text-right">نوع الحساب</th><th className="p-3 text-right">الحالة</th><th className="p-3 text-right">إجراءات</th></tr></thead>            <tbody>{pagedMatches.map(match => <tr ref={row => { rowRefs.current[match.id] = row; }} key={match.id} className="border-t align-top"><td className="p-3"><input type="checkbox" checked={selected.has(match.id)} onChange={() => setSelected(prev => { const next = new Set(prev); if (next.has(match.id)) next.delete(match.id); else next.add(match.id); return next; })} /></td><td className="p-3 font-medium">{match.invoice.name}      <div className="text-[10px] text-slate-500">المستخدم: {match.invoice.userId || "—"} · الزبون: {match.invoice.customerNumber || "—"} · الفاتورة: {match.invoice.invoiceNumber || "—"} · الساعة: {match.invoice.registrationTime || "—"}</div></td><td className="p-3 font-mono">{fmtNum(match.invoice.amount)}</td><td className="p-3">{match.invoice.accountType || "—"}</td><td className="p-3">{match.transfer?.description || "لا توجد حوالة مناسبة"}</td><td className="p-3 font-mono">{match.transfer ? fmtNum(match.transfer.amount) : "—"}</td><td className="p-3">{match.transfer?.accountType || "—"}</td><td className="p-3"><span className={match.status === "confirmed" ? "text-green-700" : match.status === "difference" ? "text-orange-700" : match.status === "visa" ? "text-teal-700" : "text-amber-700"}>{match.status === "confirmed" ? "مؤكد ومطابق" : match.status === "rejected" ? "مرفوض" : match.status === "heldInvoice" ? "معلق: فاتورة" : match.status === "heldTransfer" ? "معلق: حوالة" : match.status === "held" ? "معلق" : match.status === "visa" ? "فيزا" : "فرق يحتاج تدقيق"}</span><div className="text-[10px] text-slate-500">{match.reason} · {match.score}%</div></td><td className="p-3"><div className="flex flex-wrap gap-1"><button onClick={() => { const one = new Set([match.id]); if (match.transfer) saveAliases([match]); updateStatus(one, "confirmed"); }} className="rounded border border-green-200 bg-green-50 px-2 py-1 text-[10px] text-green-700">تأكيد</button><button onClick={() => updateStatus(new Set([match.id]), "rejected")} className="rounded border border-red-200 bg-red-50 px-2 py-1 text-[10px] text-red-700">رفض</button>            <button onClick={() => openReplacement(match.id, "invoice")} className="rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] text-emerald-700">سحب كاشير</button><button onClick={() => openReplacement(match.id, "transfer")} className="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-[10px] text-blue-700">سحب حوالة</button><button onClick={() => setDetailMatchId(detailMatchId === match.id ? null : match.id)} className="rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] text-slate-700" title="تفاصيل">i تفاصيل</button><button onClick={() => updateStatus(new Set([match.id]), "heldInvoice")} className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] text-amber-700">علق فاتورة</button><button onClick={() => updateStatus(new Set([match.id]), "heldTransfer")} className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] text-amber-700">علق حوالة</button>      {stageAVisaNumber(match.invoice.originalName) && <button onClick={() => updateStatus(new Set([match.id]), "visa")} className="rounded border border-teal-200 bg-teal-50 px-2 py-1 text-[10px] text-teal-700">ترحيل للفيزا</button>}</div></td></tr>)}            </tbody></table></div>{drawerMatchId && (() => { const current = matches.find(match => match.id === drawerMatchId); if (!current) return null;             const transferCandidates = transferData.filter(item => item.id !== current.transfer?.id && (!drawerMinAmount || item.receivedAmount >= Number(drawerMinAmount)) && (!drawerMaxAmount || item.receivedAmount <= Number(drawerMaxAmount))).slice(0, 30); const invoiceCandidates = invoiceData.filter(item => item.id !== current.invoice.id && (!drawerMinAmount || item.paidAmount >= Number(drawerMinAmount)) && (!drawerMaxAmount || item.paidAmount <= Number(drawerMaxAmount))).slice(0, 30);       return <aside className="replacement-drawer sticky top-3 shrink-0 rounded-xl border bg-white p-3 shadow-lg"><div className="mb-2 flex items-center justify-between"><strong className="text-sm">بحث واستبدال</strong><button onClick={() => setDrawerMatchId(null)} className="text-xs text-slate-500">إغلاق</button></div>      <div className="space-y-3">      {drawerMode === "invoice" && <section><p className="mb-1 text-[10px] font-bold text-emerald-700">بحث وسحب من الكاشير</p><input value={drawerInvoiceSearch} onChange={event => setDrawerInvoiceSearch(event.target.value)} placeholder="ابحث باسم أو مبلغ الفاتورة..." className="mb-2 w-full rounded-lg border px-2 py-1.5 text-xs" /><div className="max-h-48 space-y-1 overflow-auto">{invoiceCandidates.filter(item => !drawerInvoiceSearch || `${item.name} ${item.amount}`.toLowerCase().includes(drawerInvoiceSearch.toLowerCase())).map(item =>       <button key={item.id} onClick={() => replaceInvoice(current, item)} className={`block w-full rounded border p-2 text-right text-[10px] ${suggestionClass(Math.abs(item.paidAmount - current.invoice.paidAmount), stageBNameMatch(item.name, current.invoice.name, aliases))}`}>{item.name} · {fmtNum(item.paidAmount)} · المستخدم {item.userId || "—"}</button>)}      </div></section>}      <section className={drawerMode === "transfer" ? "" : "hidden"}><p className="mb-1 text-[10px] font-bold text-blue-700">بحث وسحب من الحوالات</p><input value={drawerTransferSearch} onChange={event => setDrawerTransferSearch(event.target.value)} placeholder="ابحث باسم أو مبلغ الحوالة..." className="mb-2 w-full rounded-lg border px-2 py-1.5 text-xs" /><div className="max-h-48 space-y-1 overflow-auto">{transferCandidates.filter(item => !drawerTransferSearch || `${item.description} ${item.receivedAmount}`.toLowerCase().includes(drawerTransferSearch.toLowerCase())).map(item =>       <button key={item.id} onClick={() => replaceTransfer(current, item)} className={`block w-full rounded border p-2 text-right text-[10px] ${suggestionClass(Math.abs(item.receivedAmount - current.invoice.paidAmount), stageBNameMatch(current.invoice.name, item.description, aliases))}`}>{item.description} · {fmtNum(item.receivedAmount)} · {item.accountType || "—"}</button>)}</div></section></div>            {detailMatchId === current.id && <div className="mt-3 rounded bg-slate-50 p-2 text-[10px]"><strong>تفاصيل الفاتورة:</strong><div className="mt-1 space-y-1"><div>الساعة: {current.invoice.registrationTime || "—"}</div><div>رقم الزبون: {current.invoice.customerNumber || "—"}</div><div>رقم الفاتورة: {current.invoice.invoiceNumber || "—"}</div><div>رقم المستخدم: {current.invoice.userId || "—"}</div></div><pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap">      {JSON.stringify(current.invoice.raw, null, 2)}</pre></div>}      </aside>; })()}</div><div className="flex items-center justify-center gap-3 border-t bg-slate-50 p-3 text-xs"><button onClick={() => setStageBPage(page => Math.max(1, page - 1))} disabled={currentStageBPage === 1} className="rounded border px-3 py-1.5 disabled:opacity-40">السابق</button><span>صفحة {currentStageBPage} من {totalStageBPages} · عرض {pagedMatches.length} من {visibleMatches.length}</span><button onClick={() => setStageBPage(page => Math.min(totalStageBPages, page + 1))} disabled={currentStageBPage === totalStageBPages} className="rounded border px-3 py-1.5 disabled:opacity-40">التالي</button></div>
+    </div>}
+  </div></div>;
 }
 
-function StageCPlatform({ invoices, onBack }: { invoices: StageAResult[]; onBack: () => void }) {
+interface StageCMatch {
+  invoice: StageAResult;
+  sonyName: string;
+  sonyAmount: number;
+  sonyVisa: string;
+  authNumber: string;
+  matched: boolean;
+  issue: string;
+}
+
+interface StageDPending {
+  description: string;
+  amount: number;
+  visaNumber: string;
+  date: string;
+}
+
+function extractFourDigitVisa(value: string): string {
+  const matches = value.match(/\d{4}(?!\d)/g);
+  return matches?.[matches.length - 1] || "";
+}
+
+function StageDPlatform({ matches, pending, onBack }: { matches: StageCMatch[]; pending: StageDPending[]; onBack: () => void }) {
+  const [file, setFile] = useState<File | null>(null);
+  const [headers, setHeaders] = useState<string[]>([]);
+  const [rawRows, setRawRows] = useState<Record<string, unknown>[]>([]);
+  const [map, setMap] = useState({ description: "", amount: "", date: "" });
+  const [error, setError] = useState<string | null>(null);
+  const parseAmount = (value: unknown) => Number.parseFloat(String(value ?? "").replace(/[٫٬]/g, match => match === "٫" ? "." : "").replace(/,/g, "")) || 0;
+  const loadFile = async (nextFile: File) => {
+    try {
+      const parsed = parseSheet(await readFileBuf(nextFile));
+      setFile(nextFile); setHeaders(parsed.headers); setRawRows(parsed.rows);
+      setMap({
+        description: autoDetect(parsed.headers, ["مشتريات عمولة تجار", ...HINTS.desc]),
+        amount: autoDetect(parsed.headers, HINTS.debit) || autoDetect(parsed.headers, HINTS.credit) || autoDetect(parsed.headers, ["amount", "مبلغ"]),
+        date: autoDetect(parsed.headers, HINTS.date)
+      });
+      setError(null);
+    } catch (e) { setError((e as Error).message); }
+  };
+  const pendingRows = rawRows
+    .filter(row => String(row[map.description] ?? "").includes("مشتريات عمولة تجار"))
+    .map(row => ({ description: String(row[map.description] ?? ""), amount: parseAmount(row[map.amount]), visaNumber: extractFourDigitVisa(String(row[map.description] ?? "")), date: String(row[map.date] ?? "") }));
+  const rows = pendingRows.map(bank => {
+    const match = matches.find(item => item.matched && item.sonyVisa === bank.visaNumber && Math.abs(item.invoice.amount - bank.amount) <= 0.01);
+    return { bank, match };
+  });
+  const exportStageD = () => {
+    const workbook = XLSX.utils.book_new();
+    const sheet = XLSX.utils.aoa_to_sheet([
+      ["بيان الحوالة المعلقة", "التاريخ", "مبلغ الحوالة", "رقم الفيزا", "اسم الزبون", "مبلغ الفاتورة", "رقم التفويض", "الحالة"],
+      ...rows.map(({ bank, match }) => [bank.description, bank.date, bank.amount, bank.visaNumber, match?.invoice.name || "", match?.invoice.amount || "", match?.authNumber || "", match ? "مطابق" : "غير مطابق"])
+    ]);
+    XLSX.utils.book_append_sheet(workbook, sheet, "مطابقة D");
+    XLSX.writeFile(workbook, "مطابقة_الفيزا_المرحلة_D.xlsx");
+  };
+  return <div dir="rtl" className="min-h-screen bg-slate-50 p-6 text-slate-900">
+    <div className="mx-auto max-w-6xl space-y-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <button onClick={onBack} className="flex items-center gap-1 text-sm text-slate-500 hover:text-blue-600"><ChevronLeft className="h-4 w-4" />العودة إلى C</button>
+        <h1 className="text-xl font-black">D — مطابقة حوالات الغد مع مطابقة C</h1>
+        <button onClick={exportStageD} disabled={!rows.length} className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-40"><Download className="mr-1 inline h-4 w-4" />تصدير مطابقة D</button>
+      </div>
+      <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-4 text-sm text-indigo-900">ارفع حوالات «مشتريات عمولة تجار» هنا. تتم المطابقة برقم الفيزا المكوّن من 4 أرقام والمبلغ، ويظهر رقم التفويض القادم من ملف سوني كاشير.</div>
+      {error && <div className="rounded-lg bg-red-100 p-3 text-sm text-red-800">{error}</div>}
+      <div className="rounded-xl border border-indigo-200 bg-white p-4">
+        <h2 className="mb-3 text-sm font-bold text-indigo-800">حوالات بنكية معلقة — مشتريات عمولة تجار</h2>
+        <DropZone file={file} onFile={loadFile} onClear={() => { setFile(null); setHeaders([]); setRawRows([]); }} />
+        {!!headers.length && <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+          <Sel label="بيان الحوالة" headers={headers} value={map.description} onChange={value => setMap(prev => ({ ...prev, description: value }))} />
+          <Sel label="المبلغ" headers={headers} value={map.amount} onChange={value => setMap(prev => ({ ...prev, amount: value }))} />
+          <Sel label="التاريخ" headers={headers} value={map.date} onChange={value => setMap(prev => ({ ...prev, date: value }))} />
+        </div>}
+        <p className="mt-2 text-xs text-slate-500">سيتم اعتماد الصفوف التي تحتوي على «مشتريات عمولة تجار» فقط: {pendingRows.length} حوالة.</p>
+      </div>
+      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+        <table className="w-full text-sm"><thead className="bg-slate-100 text-xs"><tr><th className="p-3 text-right">بيان الحوالة</th><th className="p-3 text-right">المبلغ</th><th className="p-3 text-right">رقم الفيزا</th><th className="p-3 text-right">اسم الزبون</th><th className="p-3 text-right">رقم التفويض</th><th className="p-3 text-right">الحالة</th></tr></thead>
+          <tbody>{rows.map(({ bank, match }) => <tr key={`${bank.description}-${bank.date}-${bank.amount}`} className="border-t"><td className="p-3">{bank.description}</td><td className="p-3 font-mono">{fmtNum(bank.amount)}</td><td className="p-3 font-mono">{bank.visaNumber || "—"}</td><td className="p-3">{match?.invoice.name || "—"}</td><td className="p-3 font-mono">{match?.authNumber || "—"}</td><td className={`p-3 font-semibold ${match ? "text-green-700" : "text-red-700"}`}>{match ? "مطابق" : "غير مطابق"}</td></tr>)}</tbody>
+        </table>
+        {!rows.length && <div className="p-10 text-center text-sm text-slate-500">لا توجد حوالات مرحّلة إلى D.</div>}
+      </div>
+    </div>
+  </div>;
+}
+
+function StageCPlatform({ invoices, onBack, onTransferToD }: { invoices: StageAResult[]; onBack: () => void; onTransferToD?: (matches: StageCMatch[], pending: StageDPending[]) => void }) {
   const [file, setFile] = useState<File | null>(null);
   const [headers, setHeaders] = useState<string[]>([]);
   const [rows, setRows] = useState<Record<string, unknown>[]>([]);
-  const [map, setMap] = useState({ name: "", amount: "" });
-  const [results, setResults] = useState<Array<{ invoice: StageAResult; sonyName: string; sonyAmount: number; sonyVisa: string; matched: boolean; issue: string }>>([]);
+  const [map, setMap] = useState({ name: "", amount: "", auth: "" });
+  const [results, setResults] = useState<StageCMatch[]>([]);
+  const [page, setPage] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const parseAmount = (value: unknown) => Number.parseFloat(String(value ?? "").replace(/[٫٬]/g, match => match === "٫" ? "." : "").replace(/,/g, "")) || 0;
   const loadSonyFile = async (nextFile: File) => {
     try {
       const parsed = parseSheet(await readFileBuf(nextFile));
       setFile(nextFile); setHeaders(parsed.headers); setRows(parsed.rows);
-      setMap({ name: autoDetect(parsed.headers, HINTS.name), amount: detectCardPaidColumn(parsed.headers) || autoDetect(parsed.headers, HINTS.debit) || autoDetect(parsed.headers, ["amount", "مبلغ"]) });
+      setMap({ name: autoDetect(parsed.headers, HINTS.name), amount: detectCardPaidColumn(parsed.headers) || autoDetect(parsed.headers, HINTS.debit) || autoDetect(parsed.headers, ["amount", "مبلغ"]), auth: autoDetect(parsed.headers, HINTS.authNum) });
       setError(null);
     } catch (e) { setError((e as Error).message); }
   };
   const runStageC = () => {
     if (!invoices.length) { setError("لا توجد فواتير فيزا مرحّلة من المرحلة A"); return; }
     if (!rows.length || !map.name || !map.amount) { setError("ارفع ملف سوني كاشير وحدد عمود البيان والمبلغ أولاً"); return; }
-    const sonyRows = rows.map((row, index) => ({ index, name: String(row[map.name] ?? "").trim(), amount: parseAmount(row[map.amount]), visa: stageAVisaNumber(String(row[map.name] ?? "")), used: false }));
+    const sonyRows = rows.map((row, index) => ({ index, name: String(row[map.name] ?? "").trim(), amount: parseAmount(row[map.amount]), visa: stageAVisaNumber(String(row[map.name] ?? "")), auth: String(row[map.auth] ?? "").trim(), used: false }));
     setResults(invoices.map(invoice => {
       const visa = stageAVisaNumber(invoice.originalName);
       const direct = sonyRows.find(row => !row.used && row.visa === visa && Math.abs(row.amount - invoice.amount) <= 0.01);
-      if (direct) { direct.used = true; return { invoice, sonyName: direct.name, sonyAmount: direct.amount, sonyVisa: direct.visa, matched: true, issue: "" }; }
+      if (direct) { direct.used = true; return { invoice, sonyName: direct.name, sonyAmount: direct.amount, sonyVisa: direct.visa, authNumber: direct.auth, matched: true, issue: "" }; }
       const group = sonyRows.filter(row => !row.used && row.visa === visa);
       const grouped = group.length > 1 ? group.reduce((sum, row) => sum + row.amount, 0) : 0;
-      if (grouped && Math.abs(grouped - invoice.amount) <= 0.01) { group.forEach(row => { row.used = true; }); return { invoice, sonyName: group.map(row => row.name).join(" + "), sonyAmount: grouped, sonyVisa: visa, matched: true, issue: "مطابقة مجمعة" }; }
-      return { invoice, sonyName: "", sonyAmount: 0, sonyVisa: visa, matched: false, issue: visa ? "رقم الفيزا موجود لكن الرقم أو المبلغ غير موجود في سوني" : "لم يتم العثور على رقم فيزا من 4 أرقام" };
+      if (grouped && Math.abs(grouped - invoice.amount) <= 0.01) { group.forEach(row => { row.used = true; }); return { invoice, sonyName: group.map(row => row.name).join(" + "), sonyAmount: grouped, sonyVisa: visa, authNumber: group.map(row => row.auth).filter(Boolean).join(" + "), matched: true, issue: "مطابقة مجمعة" }; }
+      return { invoice, sonyName: "", sonyAmount: 0, sonyVisa: visa, authNumber: "", matched: false, issue: visa ? "رقم الفيزا موجود لكن الرقم أو المبلغ غير موجود في سوني" : "لم يتم العثور على رقم فيزا من 4 أرقام" };
     }));
+    setPage(1);
     setError(null);
   };
-  const exportStageC = () => { const workbook = XLSX.utils.book_new(); const sheet = XLSX.utils.aoa_to_sheet([["البيان المرحّل من A", "مصدر التسجيل في A", "رقم الفيزا", "مبلغ الفاتورة", "بيان سوني", "مبلغ سوني", "الحالة", "ملاحظة"], ...results.map(result => [result.invoice.originalName, result.invoice.source, result.sonyVisa, result.invoice.amount, result.sonyName, result.sonyAmount || "", result.matched ? "مطابق" : "غير مطابق", result.invoice.categoryIssue || result.issue])]); XLSX.utils.book_append_sheet(workbook, sheet, "مطابقة C"); XLSX.writeFile(workbook, "مطابقة_الفيزا_مع_سوني.xlsx"); };
-  return <div dir="rtl" className="min-h-screen bg-slate-50 p-6 text-slate-900"><div className="mx-auto max-w-6xl space-y-5"><div className="flex flex-wrap items-center justify-between gap-3"><button onClick={onBack} className="flex items-center gap-1 text-sm text-slate-500 hover:text-blue-600"><ChevronLeft className="h-4 w-4" />العودة لمنصة الفيزا</button><h1 className="text-xl font-black">C — مطابقة الفواتير مع سوني كاشير فيزا</h1><div className="flex gap-2"><button onClick={runStageC} className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700"><Sparkles className="mr-1 inline h-4 w-4" />تشغيل المطابقة</button>{results.length > 0 && <button onClick={exportStageC} className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700"><Download className="mr-1 inline h-4 w-4" />تصدير Excel</button>}</div></div><div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">تم ترحيل {invoices.length} فاتورة فيزا من A. تتم المطابقة أولاً برقم الفيزا والمبلغ، ثم يتم تجربة المطابقة المجمعة عند وجود أكثر من حركة لنفس الرقم.</div>{error && <div className="rounded-lg bg-red-100 p-3 text-sm text-red-800">{error}</div>}<div className="rounded-xl border border-slate-200 bg-white p-4"><h2 className="mb-3 text-sm font-bold">ملف سوني كاشير فيزا</h2><DropZone file={file} onFile={loadSonyFile} onClear={() => { setFile(null); setHeaders([]); setRows([]); }} />{!!headers.length && <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2"><Sel label="البيان الذي يحتوي رقم الفيزا" headers={headers} value={map.name} onChange={value => setMap(prev => ({ ...prev, name: value }))} /><Sel label="المبلغ" headers={headers} value={map.amount} onChange={value => setMap(prev => ({ ...prev, amount: value }))} /></div>}</div>{!!results.length && <div className="overflow-hidden rounded-xl border border-slate-200 bg-white"><div className="border-b bg-slate-50 px-4 py-3 text-sm font-bold">مطابق: {results.filter(result => result.matched).length} · غير مطابق: {results.filter(result => !result.matched).length}</div><div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-slate-100 text-xs"><tr><th className="p-3 text-right">بيان الفاتورة</th><th className="p-3 text-right">رقم الفيزا</th><th className="p-3 text-right">المبلغ</th><th className="p-3 text-right">بيان سوني</th><th className="p-3 text-right">مبلغ سوني</th><th className="p-3 text-right">الحالة</th></tr></thead><tbody>{results.map(result => <tr key={`${result.invoice.source}-${result.invoice.id}`} className="border-t"><td className="p-3">{result.invoice.originalName}</td><td className="p-3 font-mono">{result.sonyVisa || "—"}</td><td className="p-3 font-mono">{fmtNum(result.invoice.amount)}</td><td className="p-3">{result.sonyName || "—"}</td><td className="p-3 font-mono">{result.sonyAmount ? fmtNum(result.sonyAmount) : "—"}</td><td className={`p-3 font-semibold ${result.matched ? "text-green-700" : "text-red-700"}`}>{result.matched ? result.issue || "مطابق" : "غير مطابق"}</td></tr>)}</tbody></table></div></div>}</div></div>;
+  const pageSize = 20;
+  const totalPages = Math.max(1, Math.ceil(results.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const pagedResults = results.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const exportStageC = () => { const workbook = XLSX.utils.book_new(); const sheet = XLSX.utils.aoa_to_sheet([["اسم الزبون", "رقم الفيزا", "مبلغ الفاتورة", "رقم التفويض", "بيان سوني", "مبلغ سوني", "الحالة", "ملاحظة"], ...results.map(result => [result.invoice.name, result.sonyVisa, result.invoice.amount, result.authNumber, result.sonyName, result.sonyAmount || "", result.matched ? "مطابق" : "غير مطابق", result.invoice.categoryIssue || result.issue])]); XLSX.utils.book_append_sheet(workbook, sheet, "مطابقة فيزا"); XLSX.writeFile(workbook, "مطابقة_الفيزا_مع_سوني.xlsx"); };
+  return <div dir="rtl" className="min-h-screen bg-slate-50 p-6 text-slate-900"><div className="mx-auto max-w-6xl space-y-5">
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <button onClick={onBack} className="flex items-center gap-1 text-sm text-slate-500 hover:text-blue-600"><ChevronLeft className="h-4 w-4" />العودة لمنصة الفيزا</button>
+      <h1 className="text-xl font-black">C — مطابقة الفواتير مع سوني كاشير فيزا</h1>
+      <div className="flex gap-2">
+        <button onClick={runStageC} className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white"><Sparkles className="mr-1 inline h-4 w-4" />تشغيل المطابقة</button>
+        {results.length > 0 && <button onClick={exportStageC} className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white"><Download className="mr-1 inline h-4 w-4" />تصدير مطابقة فيزا</button>}
+        {results.some(result => result.matched) && <button onClick={() => onTransferToD?.(results, [])} className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white">ترحيل إلى D</button>}
+      </div>
+    </div>
+    <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">تم ترحيل {invoices.length} فاتورة فيزا من A. تتم المطابقة برقم الفيزا والمبلغ، ويُحفظ رقم التفويض من سوني كاشير.</div>
+    {error && <div className="rounded-lg bg-red-100 p-3 text-sm text-red-800">{error}</div>}
+    <div className="rounded-xl border border-slate-200 bg-white p-4">
+      <h2 className="mb-3 text-sm font-bold">ملف سوني كاشير فيزا</h2>
+      <DropZone file={file} onFile={loadSonyFile} onClear={() => { setFile(null); setHeaders([]); setRows([]); }} />
+      {!!headers.length && <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+        <Sel label="البيان الذي يحتوي رقم الفيزا" headers={headers} value={map.name} onChange={value => setMap(prev => ({ ...prev, name: value }))} />
+        <Sel label="المبلغ" headers={headers} value={map.amount} onChange={value => setMap(prev => ({ ...prev, amount: value }))} />
+        <Sel label="رقم التفويض" headers={headers} value={map.auth} onChange={value => setMap(prev => ({ ...prev, auth: value }))} />
+      </div>}
+    </div>
+    {!!results.length && <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+      <div className="border-b bg-slate-50 px-4 py-3 text-sm font-bold">مطابق: {results.filter(result => result.matched).length} · غير مطابق: {results.filter(result => !result.matched).length}</div>
+      <div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-slate-100 text-xs"><tr><th className="p-3 text-right">اسم الزبون</th><th className="p-3 text-right">رقم الفيزا</th><th className="p-3 text-right">المبلغ</th><th className="p-3 text-right">رقم التفويض</th><th className="p-3 text-right">بيان سوني</th><th className="p-3 text-right">الحالة</th></tr></thead><tbody>
+        {pagedResults.map(result => <tr key={`${result.invoice.source}-${result.invoice.id}`} className="border-t"><td className="p-3">{result.invoice.name}</td><td className="p-3 font-mono">{result.sonyVisa || "—"}</td><td className="p-3 font-mono">{fmtNum(result.invoice.amount)}</td><td className="p-3 font-mono">{result.authNumber || "—"}</td><td className="p-3">{result.sonyName || "—"}</td><td className={`p-3 font-semibold ${result.matched ? "text-green-700" : "text-red-700"}`}>{result.matched ? result.issue || "مطابق" : "غير مطابق"}</td></tr>)}
+      </tbody></table></div>
+    </div>}
+  </div></div>;
+}
+
+function EmptyStageB({ onBack }: { onBack: () => void }) {
+  return <div dir="rtl" className="min-h-screen bg-slate-50 p-6 text-slate-900">
+    <div className="mx-auto flex min-h-[70vh] max-w-6xl items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-white">
+      <div className="text-center">
+        <div className="text-lg font-bold text-slate-700">منصة B</div>
+        <p className="mt-2 text-sm text-slate-500">هذه المنصة فارغة حاليًا.</p>
+        <button onClick={onBack} className="mt-4 rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700">العودة</button>
+      </div>
+    </div>
+  </div>;
 }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
-export default function Reconciliation2({ onBack }: { onBack: () => void }) {
-  const [stagePage, setStagePage] = useState<"hub" | "stageA" | "stageB" | "stageC" | "stageF">("hub");
+export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain, visaInvoices = [], initialStage = "hub" }: { onBack: () => void; onStageAToMain?: (results: StageAResult[]) => void; onStageBToMain?: () => void; visaInvoices?: StageAResult[]; initialStage?: "hub" | "stageA" | "stageB" | "stageC" | "stageD" | "stageF" }) {
+  const [stagePage, setStagePage] = useState<"hub" | "stageA" | "stageB" | "stageC" | "stageD" | "stageF">(initialStage);
+  const [stageDMatches, setStageDMatches] = useState<StageCMatch[]>([]);
+  const [stageDPending, setStageDPending] = useState<StageDPending[]>([]);
   const [stageBInvoices, setStageBInvoices] = useState<StageAResult[]>([]);
-  const [stageCInvoices, setStageCInvoices] = useState<StageAResult[]>([]);
+  const [stageCInvoices, setStageCInvoices] = useState<StageAResult[]>(visaInvoices);
   const [sessionLoaded, setSessionLoaded] = useState(false);
 
   // ─── File states ──────────────────────────────────────────────────────────
@@ -678,11 +1222,11 @@ export default function Reconciliation2({ onBack }: { onBack: () => void }) {
   };
 
   // ─── Parse bank rows + auto-separate مشتريات عمولة تجار ─────────────────────
-  const VISA_BANK_KEYWORDS = ["مشتريات عمولة تجار", "مشتريات تجار", "عمولة تجار", "مشتريات عمولة"];
-  function isVisaBankDesc(desc: string): boolean {
+  const isVisaBankDesc = useCallback((desc: string): boolean => {
+    const visaBankKeywords = ["مشتريات عمولة تجار", "مشتريات تجار", "عمولة تجار", "مشتريات عمولة"];
     const d = desc.toLowerCase();
-    return VISA_BANK_KEYWORDS.some(kw => d.includes(kw.toLowerCase()));
-  }
+    return visaBankKeywords.some(kw => d.includes(kw.toLowerCase()));
+  }, []);
 
   const parsedBank = useMemo((): BankRow2[] => {
     return bankRowsRaw.map((r, i) => {
@@ -706,7 +1250,7 @@ export default function Reconciliation2({ onBack }: { onBack: () => void }) {
         orig: r,
       };
     }).filter((r): r is BankRow2 => r !== null);
-  }, [bankRowsRaw, bankMap]);
+  }, [bankRowsRaw, bankMap, isVisaBankDesc]);
 
   // فيزا بنك = مشتريات عمولة تجار المفرزة تلقائياً
   const visaBankRows = useMemo(() => parsedBank.filter(b => b.isVisaBank), [parsedBank]);
@@ -1178,13 +1722,16 @@ export default function Reconciliation2({ onBack }: { onBack: () => void }) {
   const canExport = parsedBank.length > 0 || parsedAza.length > 0 || parsedSony.length > 0;
 
   if (stagePage === "stageA") {
-    return <StageAPlatform onBack={() => setStagePage("hub")} onTransferToB={results => { setStageBInvoices(results.filter(result => result.category !== "فيزا")); setStagePage("stageB"); }} onTransferVisaToC={results => { setStageCInvoices(results.filter(result => result.category === "فيزا")); setStagePage("stageC"); }} />;
+    return <StageAPlatform onBack={() => setStagePage("hub")} onTransferToB={results => { if (onStageAToMain) onStageAToMain(results); else { setStageBInvoices(results); setStagePage("stageB"); } }} onTransferVisaToC={results => { setStageCInvoices(results.filter(result => result.category === "فيزا")); setStagePage("stageC"); }} />;
   }
   if (stagePage === "stageB") {
-    return <StageBPlatform invoices={stageBInvoices} onBack={() => setStagePage("hub")} />;
+    return <EmptyStageB onBack={() => setStagePage("hub")} />;
   }
   if (stagePage === "stageC") {
-    return <StageCPlatform invoices={stageCInvoices} onBack={() => setStagePage("hub")} />;
+    return <StageCPlatform invoices={stageCInvoices} onBack={() => setStagePage("hub")} onTransferToD={(matches, pending) => { setStageDMatches(matches); setStageDPending(pending); setStagePage("stageD"); }} />;
+  }
+  if (stagePage === "stageD") {
+    return <StageDPlatform matches={stageDMatches} pending={stageDPending} onBack={() => setStagePage("stageC")} />;
   }
   if (stagePage === "stageF") {
     return <div dir="rtl" className="min-h-screen bg-slate-50 p-6 text-slate-900"><div className="mx-auto max-w-4xl space-y-5">
@@ -1207,8 +1754,8 @@ export default function Reconciliation2({ onBack }: { onBack: () => void }) {
           <button onClick={onBack} className="absolute right-5 top-5 flex items-center gap-1.5 text-sm text-slate-500 transition-colors hover:text-indigo-600">
               <ChevronLeft className="w-4 h-4"/>المنصة الأولى
           </button>
-          <h1 className="text-3xl font-black tracking-tight text-slate-900">منصة تسوية 2 — مطابقة الفيزا</h1>
-          <p className="mx-auto mt-2 max-w-2xl text-sm text-slate-500">نظام متكامل لفرز الحوالات، مطابقة الفواتير، واسترجاع أرقام التفويض بسهولة</p>
+          <h1 className="text-3xl font-black tracking-tight text-slate-900">منصة التسوية الذكية</h1>
+          <p className="mx-auto mt-2 max-w-2xl text-sm text-slate-500">اختر المرحلة المناسبة لمعالجة الفواتير والحوالات والفيزا</p>
           <div className="absolute left-5 top-5 flex items-center gap-2">
           {canExport && (
             <button onClick={handleExport} className="absolute left-5 top-5 flex items-center gap-2 rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-green-700">
@@ -1231,12 +1778,12 @@ export default function Reconciliation2({ onBack }: { onBack: () => void }) {
         <section className="grid grid-cols-1 gap-4 md:grid-cols-2">
           {[
             { id: "stage-a", code: "A", title: "فرز الفواتير حسب قاعدة البيانات", description: "مطابقة اسم ومبلغ كل فاتورة مع قاعدة البيانات، ثم استخراج المطابقات ومشاكل أخرى.", color: "bg-blue-600", text: "text-blue-600", target: "stage-a" },
-            { id: "stage-b", code: "B", title: "مطابقة الفواتير مع البنك والمحفظة", description: "مطابقة الفواتير المؤكدة مع ملف بنك فلسطين وملف المحفظة، وترحيل الزيادة لقائمة الغد.", color: "bg-emerald-600", text: "text-emerald-600", target: "r2-bank" },
+            { id: "stage-b", code: "B", title: "المطابقة الذكية للفواتير والحوالات", description: "رفع أربعة ملفات عند العمل المستقل، أو ملفي الحوالات عند ترحيل الفواتير من قاعدة البيانات.", color: "bg-emerald-600", text: "text-emerald-600", target: "r2-bank" },
             { id: "stage-c", code: "C", title: "مطابقة السوني كاشير (فيزا)", description: "مطابقة العمليات المعلقة واسترجاع أرقام التفويض مع بيانات الفيزا.", color: "bg-amber-600", text: "text-amber-600", target: "r2-sony" },
-            { id: "stage-d", code: "D", title: "مطابقة الفيزا — المرحلة الثانية", description: "مطابقة أرقام التفويض المؤكدة مع كشف بنك الغد وإغلاق دورة التسوية.", color: "bg-indigo-600", text: "text-indigo-600", target: "r2-auth" },
+            { id: "stage-d", code: "D", title: "مطابقة الفيزا — المرحلة الثانية", description: "مطابقة أرقام الفيزا المؤكدة مع الحوالات البنكية المعلقة.", color: "bg-indigo-600", text: "text-indigo-600", target: "r2-auth" },
             { id: "stage-f", code: "F", title: "تحويل إيصال SoftPOS إلى Excel", description: "لصق نص الإيصال وتحويل الحركات وأرقام البطاقات والتفويض إلى ملف سوني جاهز.", color: "bg-slate-700", text: "text-slate-700", target: "r2-softpos" },
           ].map(stage => (
-            <button key={stage.id} onClick={() => stage.id === "stage-a" ? setStagePage("stageA") : stage.id === "stage-b" ? setStagePage("stageB") : stage.id === "stage-c" ? setStagePage("stageC") : stage.id === "stage-f" ? setStagePage("stageF") : document.getElementById(stage.target)?.scrollIntoView({ behavior: "smooth", block: "start" })}
+            <button key={stage.id} onClick={() => stage.id === "stage-a" ? setStagePage("stageA") : stage.id === "stage-b" ? (onStageBToMain ? onStageBToMain() : setStagePage("stageB")) : stage.id === "stage-c" ? setStagePage("stageC") : stage.id === "stage-d" ? setStagePage("stageD") : stage.id === "stage-f" ? setStagePage("stageF") : document.getElementById(stage.target)?.scrollIntoView({ behavior: "smooth", block: "start" })}
               className="group flex min-h-36 items-center gap-5 rounded-2xl border border-slate-200 bg-white p-5 text-right shadow-sm transition-all hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md">
               <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-xl ${stage.color} text-xl font-black text-white shadow-sm`}>{stage.code}</span>
               <span className="min-w-0 flex-1">

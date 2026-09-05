@@ -1,3 +1,177 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+.replacement-drawer {
+  width: min(430px, 38vw);
+  min-width: 330px;
+  max-height: calc(100vh - 110px);
+  overflow-y: auto;
+  border-color: #d9e2ec;
+  background: #fff;
+}
+
+.drawer-sidebar {
+  position: sticky;
+  top: 15vh;
+  width: 550px;
+  max-width: 95vw;
+  height: 70vh;
+  max-height: 70vh;
+}
+
+@media (max-width: 900px) {
+  .drawer-sidebar {
+    position: fixed;
+    inset: 1rem;
+    z-index: 50;
+    width: auto;
+    height: calc(100vh - 2rem);
+  }
+}
+
+.replacement-drawer > div:first-child {
+  position: sticky;
+  top: -0.75rem;
+  z-index: 2;
+  margin: -0.75rem -0.75rem 0.75rem;
+  padding: 0.75rem;
+  background: #008f70;
+  color: #fff;
+}
+
+.replacement-drawer > div:first-child button {
+  color: #fff;
+}
+
+.replacement-drawer section {
+  border-bottom: 1px solid #e5e7eb;
+  padding-bottom: 0.75rem;
+}
+
+.replacement-drawer section > p {
+  border-radius: 0.5rem;
+  background: #f0fdf4;
+  padding: 0.5rem;
+}
+
+.replacement-drawer section:nth-child(2) > p {
+  background: #eff6ff;
+}
+
+.replacement-drawer section input {
+  min-height: 2.25rem;
+  border-color: #d9e2ec;
+}
+
+.replacement-drawer section > div {
+  max-height: 24rem;
+  padding-right: 0.15rem;
+}
+
+.replacement-drawer section > div > button {
+  min-height: 3.25rem;
+  border-color: #dbe4ee;
+  background: #fff;
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.replacement-drawer section > div > button:hover {
+  border-color: #10b981;
+  background: #ecfdf5;
+}
+
+@media (max-width: 900px) {
+  .replacement-drawer {
+    width: 100%;
+    min-width: 0;
+  }
+}
+
+/* The confirmed view is intentionally calmer and denser than the review queue. */
+.stage-b-confirmed {
+  border-color: #dbe7df;
+  background: #fff;
+}
+
+.stage-b-confirmed > div:first-child {
+  gap: 0.5rem;
+  background: #f8faf9;
+  border-color: #e2ebe5;
+}
+
+.stage-b-confirmed > div:first-child > div:first-child {
+  order: 4;
+}
+
+.stage-b-confirmed > div:first-child input {
+  min-height: 2.25rem;
+  border-color: #d8e3dc;
+  background: #fff;
+}
+
+.stage-b-confirmed > div:first-child input:first-of-type {
+  min-width: 18rem;
+}
+
+.stage-b-confirmed > div:first-child input:last-of-type {
+  min-width: 14rem;
+}
+
+.stage-b-confirmed > div:first-child button {
+  border-color: #d8e3dc;
+  background: #fff;
+}
+
+.stage-b-confirmed > div:first-child button:nth-last-child(2) {
+  background: #eff6ff;
+  color: #2563eb;
+}
+
+.stage-b-confirmed > div:first-child button:last-child {
+  background: #fef2f2;
+  color: #dc2626;
+}
+
+.stage-b-confirmed thead {
+  background: #fff;
+  color: #334155;
+}
+
+.stage-b-confirmed tbody tr {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
+
+.stage-b-confirmed tbody tr:hover {
+  background: #e8f9ee;
+}
+
+.stage-b-confirmed tbody td:last-child,
+.stage-b-confirmed thead th:last-child {
+  min-width: 12rem;
+}
+
+.stage-b-confirmed > div:first-child > button:nth-child(5),
+.stage-b-confirmed tbody td:last-child > div > button:nth-child(1),
+.stage-b-confirmed tbody td:last-child > div > button:nth-child(3),
+.stage-b-confirmed tbody td:last-child > div > button:nth-child(4),
+.stage-b-confirmed tbody td:last-child > div > button:nth-child(6),
+.stage-b-confirmed tbody td:last-child > div > button:nth-child(7) {
+  display: none;
+}
+
+.stage-b-confirmed tbody td:nth-child(8) span {
+  display: inline-flex;
+  border: 1px solid #86efac;
+  border-radius: 9999px;
+  background: #dcfce7;
+  padding: 0.2rem 0.65rem;
+  color: #15803d;
+  font-weight: 700;
+}
+
+.stage-b-confirmed tbody td:nth-child(8) > div {
+  color: #16a34a;
+}
