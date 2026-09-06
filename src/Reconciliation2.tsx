@@ -1112,31 +1112,31 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
   const [bankFile, setBankFile] = useState<File|null>(null);
   const [bankHeaders, setBankHeaders] = useState<string[]>([]);
   const [bankRowsRaw, setBankRowsRaw] = useState<Record<string,unknown>[]>([]);
-  const [bankMap, setBankMap] = useState({ date:"", desc:"", debit:"", credit:"", accountType:"" });
+  const [bankMap, setBankMap] = useState({ date:"", desc:"", debit:"", credit:"", accountType:"", reference:"" });
 
   // 2. كشف الأستاذ (الاستاذ) — الفواتير الكاملة (~1050)
   const [azaFile, setAzaFile] = useState<File|null>(null);
   const [azaHeaders, setAzaHeaders] = useState<string[]>([]);
   const [azaRowsRaw, setAzaRowsRaw] = useState<Record<string,unknown>[]>([]);
-  const [azaMap, setAzaMap] = useState({ date:"", name:"", debit:"", credit:"", accountType:"" });
+  const [azaMap, setAzaMap] = useState({ date:"", name:"", debit:"", credit:"", accountType:"", reference:"" });
 
   // 3. كشف اليومي كاشير — حوالات يوم كامل (~1000)
   const [dailyFile, setDailyFile] = useState<File|null>(null);
   const [dailyHeaders, setDailyHeaders] = useState<string[]>([]);
   const [dailyRowsRaw, setDailyRowsRaw] = useState<Record<string,unknown>[]>([]);
-  const [dailyMap, setDailyMap] = useState({ date:"", name:"", debit:"", credit:"", accountType:"" });
+  const [dailyMap, setDailyMap] = useState({ date:"", name:"", debit:"", credit:"", accountType:"", reference:"" });
 
   // 4. سوني كاشير فيزا — اسم الزبون + رقم 4 أرقام + مبلغ
   const [sonyFile, setSonyFile] = useState<File|null>(null);
   const [sonyHeaders, setSonyHeaders] = useState<string[]>([]);
   const [sonyRowsRaw, setSonyRowsRaw] = useState<Record<string,unknown>[]>([]);
-  const [sonyMap, setSonyMap] = useState({ date:"", name:"", debit:"", credit:"", authNum:"" });
+  const [sonyMap, setSonyMap] = useState({ date:"", name:"", debit:"", credit:"", accountType:"", authNum:"" });
 
   // 5. رقم التفويض فيزا — ملف أرقام التفويض
   const [authFile, setAuthFile] = useState<File|null>(null);
   const [authHeaders, setAuthHeaders] = useState<string[]>([]);
   const [authRowsRaw, setAuthRowsRaw] = useState<Record<string,unknown>[]>([]);
-  const [authMap, setAuthMap] = useState({ name:"", authNum:"", amount:"" });
+  const [authMap, setAuthMap] = useState({ name:"", authNum:"", amount:"", date:"" });
 
   // ─── Matched & pending state ──────────────────────────────────────────────
   const [matchedVisa, setMatchedVisa] = useState<MatchedVisa[]>([]);
@@ -1145,6 +1145,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
   const [tab, setTab] = useState<R2Tab>("overview");
   const [error, setError] = useState<string|null>(null);
   const [expandedKey, setExpandedKey] = useState<string|null>(null);
+  const [visaSwaps, setVisaSwaps] = useState<Record<string, boolean>>({ bank: false, aza: false, daily: false, sony: false, auth: false });
 
   // ─── لصق إيصال SoftPOS وتحويله لملف سوني كاشير فيزا ──────────────────────
   const [softposText, setSoftposText] = useState("");
@@ -1155,15 +1156,15 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
       const s = await storageGet<any>("recon2_session", null);
       if (s) {
         setBankHeaders(s.bankHeaders || []); setBankRowsRaw(s.bankRowsRaw || []);
-        setBankMap({ date:"", desc:"", debit:"", credit:"", accountType:"", ...(s.bankMap||{}) });
+        setBankMap({ date:"", desc:"", debit:"", credit:"", accountType:"", reference:"", ...(s.bankMap||{}) });
         setAzaHeaders(s.azaHeaders || []); setAzaRowsRaw(s.azaRowsRaw || []);
-        setAzaMap({ date:"", name:"", debit:"", credit:"", accountType:"", ...(s.azaMap||{}) });
+        setAzaMap({ date:"", name:"", debit:"", credit:"", accountType:"", reference:"", ...(s.azaMap||{}) });
         setDailyHeaders(s.dailyHeaders || []); setDailyRowsRaw(s.dailyRowsRaw || []);
-        setDailyMap({ date:"", name:"", debit:"", credit:"", accountType:"", ...(s.dailyMap||{}) });
+        setDailyMap({ date:"", name:"", debit:"", credit:"", accountType:"", reference:"", ...(s.dailyMap||{}) });
         setSonyHeaders(s.sonyHeaders || []); setSonyRowsRaw(s.sonyRowsRaw || []);
-        setSonyMap({ date:"", name:"", debit:"", credit:"", authNum:"", ...(s.sonyMap||{}) });
+        setSonyMap({ date:"", name:"", debit:"", credit:"", accountType:"", authNum:"", ...(s.sonyMap||{}) });
         setAuthHeaders(s.authHeaders || []); setAuthRowsRaw(s.authRowsRaw || []);
-        setAuthMap({ name:"", authNum:"", amount:"", ...(s.authMap||{}) });
+        setAuthMap({ name:"", authNum:"", amount:"", date:"", ...(s.authMap||{}) });
         setMatchedVisa(s.matchedVisa || []);
         setPendingVisaBank(s.pendingVisaBank || []);
         setRejectedPairs(new Set(s.rejectedPairs || []));
@@ -1202,7 +1203,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
       setBankHeaders(headers); setBankRowsRaw(rows);
       setBankMap({ date:autoDetect(headers,HINTS.date), desc:autoDetect(headers,HINTS.desc),
         debit:autoDetect(headers,HINTS.debit), credit:autoDetect(headers,HINTS.credit),
-        accountType:autoDetect(headers,HINTS.accountType) });
+        accountType:autoDetect(headers,HINTS.accountType), reference:autoDetect(headers,HINTS.authNum) });
     } catch(e) { setError((e as Error).message); }
   };
   const loadAza = async (f: File) => {
@@ -1212,7 +1213,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
       setAzaHeaders(headers); setAzaRowsRaw(rows);
       setAzaMap({ date:autoDetect(headers,HINTS.date), name:autoDetect(headers,HINTS.name),
         debit:autoDetect(headers,HINTS.debit), credit:autoDetect(headers,HINTS.credit),
-        accountType:autoDetect(headers,HINTS.accountType) });
+        accountType:autoDetect(headers,HINTS.accountType), reference:autoDetect(headers,HINTS.authNum) });
     } catch(e) { setError((e as Error).message); }
   };
   const loadDaily = async (f: File) => {
@@ -1222,7 +1223,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
       setDailyHeaders(headers); setDailyRowsRaw(rows);
       setDailyMap({ date:autoDetect(headers,HINTS.date), name:autoDetect(headers,HINTS.name),
         debit:autoDetect(headers,HINTS.debit), credit:autoDetect(headers,HINTS.credit),
-        accountType:autoDetect(headers,HINTS.accountType) });
+        accountType:autoDetect(headers,HINTS.accountType), reference:autoDetect(headers,HINTS.authNum) });
     } catch(e) { setError((e as Error).message); }
   };
   const loadSony = async (f: File) => {
@@ -1232,7 +1233,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
       setSonyHeaders(headers); setSonyRowsRaw(rows);
       setSonyMap({ date:autoDetect(headers,HINTS.date), name:autoDetect(headers,HINTS.name),
         debit:autoDetect(headers,HINTS.debit), credit:autoDetect(headers,HINTS.credit),
-        authNum:autoDetect(headers,HINTS.authNum) });
+        accountType:autoDetect(headers,HINTS.accountType), authNum:autoDetect(headers,HINTS.authNum) });
     } catch(e) { setError((e as Error).message); }
   };
   const loadAuth = async (f: File) => {
@@ -1241,7 +1242,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
       const { headers, rows } = parseSheet(await readFileBuf(f));
       setAuthHeaders(headers); setAuthRowsRaw(rows);
       setAuthMap({ name:autoDetect(headers,HINTS.name), authNum:autoDetect(headers,HINTS.authNum),
-        amount:autoDetect(headers,HINTS.debit) });
+        amount:autoDetect(headers,HINTS.debit), date:autoDetect(headers,HINTS.date) });
     } catch(e) { setError((e as Error).message); }
   };
 
