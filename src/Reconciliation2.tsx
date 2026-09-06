@@ -320,9 +320,10 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC }: { onBack: 
   const [invoiceFiles, setInvoiceFiles] = useState<Record<string, File | null>>({ bank: null, wallet: null, visa: null });
   const [invoiceHeaders, setInvoiceHeaders] = useState<Record<string, string[]>>({ bank: [], wallet: [], visa: [] });
   const [invoiceRows, setInvoiceRows] = useState<Record<string, Record<string, unknown>[]>>({ bank: [], wallet: [], visa: [] });
-  const [invoiceMaps, setInvoiceMaps] = useState<Record<string, { name: string; amount: string; accountType: string }>>({
-    bank: { name: "", amount: "", accountType: "" }, wallet: { name: "", amount: "", accountType: "" }, visa: { name: "", amount: "", accountType: "" }
+  const [invoiceMaps, setInvoiceMaps] = useState<Record<string, { name: string; paidAmount: string; receivedAmount: string; accountType: string }>>({
+    bank: { name: "", paidAmount: "", receivedAmount: "", accountType: "" }, wallet: { name: "", paidAmount: "", receivedAmount: "", accountType: "" }, visa: { name: "", paidAmount: "", receivedAmount: "", accountType: "" }
   });
+  const [invoiceSwaps, setInvoiceSwaps] = useState<Record<string, boolean>>({ bank: false, wallet: false, visa: false });
   const [results, setResults] = useState<StageAResult[]>([]);
   const [resultFilter, setResultFilter] = useState<"all" | "matched" | "unmatched" | "wallet" | "جوال بي" | "visa">("all");
   const [selectedResultIds, setSelectedResultIds] = useState<Set<string>>(new Set());
@@ -359,7 +360,8 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC }: { onBack: 
       setInvoiceRows(prev => ({ ...prev, [source]: parsed.rows }));
       setInvoiceMaps(prev => ({ ...prev, [source]: {
         name: autoDetect(parsed.headers, HINTS.name),
-        amount: detectCardPaidColumn(parsed.headers) || autoDetect(parsed.headers, HINTS.debit) || autoDetect(parsed.headers, ["amount", "مبلغ"]),
+        paidAmount: detectCardPaidColumn(parsed.headers) || autoDetect(parsed.headers, HINTS.debit) || autoDetect(parsed.headers, ["amount", "مبلغ"]),
+        receivedAmount: autoDetect(parsed.headers, HINTS.credit),
         accountType: autoDetect(parsed.headers, HINTS.accountType)
       }}));
     } catch (e) { setError((e as Error).message); }
@@ -375,7 +377,9 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC }: { onBack: 
       invoiceRows[source].forEach((invoice, index) => {
         const originalName = String(map.name ? invoice[map.name] : "").trim();
         const name = cleanStageAName(originalName);
-        const amount = parseStageAAmount(map.amount ? invoice[map.amount] : 0);
+        const paidAmount = parseStageAAmount(map.paidAmount ? invoice[map.paidAmount] : 0);
+        const receivedAmount = parseStageAAmount(map.receivedAmount ? invoice[map.receivedAmount] : 0);
+        const amount = invoiceSwaps[source] ? receivedAmount || paidAmount : paidAmount || receivedAmount;
         if (!name && !amount) return;
         const sameName = available.filter(item => !item.used && stageANameKey(String(item.row[databaseMap.name])) === stageANameKey(name));
         const match = sameName.find(item => Math.abs(parseStageAAmount(item.row[databaseMap.amount]) - amount) <= 0.01);
@@ -477,7 +481,18 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC }: { onBack: 
     <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
       <h3 className="text-sm font-bold text-slate-800">{label}</h3>
       <DropZone file={invoiceFiles[source]} onFile={file => loadInvoices(source, file)} onClear={() => { setInvoiceFiles(prev => ({ ...prev, [source]: null })); setInvoiceHeaders(prev => ({ ...prev, [source]: [] })); setInvoiceRows(prev => ({ ...prev, [source]: [] })); }} />
-      {!!invoiceHeaders[source].length && <div className="grid grid-cols-1 gap-2 sm:grid-cols-3"><Sel label="اسم الزبون" headers={invoiceHeaders[source]} value={invoiceMaps[source].name} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], name: value } }))} /><Sel label="المبلغ" headers={invoiceHeaders[source]} value={invoiceMaps[source].amount} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], amount: value } }))} /><Sel label="نوع الحساب" headers={invoiceHeaders[source]} value={invoiceMaps[source].accountType} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], accountType: value } }))} /></div>}
+      {!!invoiceHeaders[source].length && <>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <Sel label="اسم الزبون" headers={invoiceHeaders[source]} value={invoiceMaps[source].name} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], name: value } }))} />
+          <Sel label="المبالغ المدفوعة (Debit)" headers={invoiceHeaders[source]} value={invoiceMaps[source].paidAmount} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], paidAmount: value } }))} />
+          <Sel label="المبالغ المستلمة (Credit)" headers={invoiceHeaders[source]} value={invoiceMaps[source].receivedAmount} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], receivedAmount: value } }))} />
+          <Sel label="نوع الحساب" headers={invoiceHeaders[source]} value={invoiceMaps[source].accountType} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], accountType: value } }))} />
+        </div>
+        <label className="flex w-fit cursor-pointer items-center gap-2 text-xs text-slate-600">
+          <input type="checkbox" checked={invoiceSwaps[source]} onChange={event => setInvoiceSwaps(prev => ({ ...prev, [source]: event.target.checked }))} className="rounded" />
+          عكس المدين والدائن
+        </label>
+      </>}
     </div>
   );
 
@@ -592,6 +607,7 @@ function StageBPlatform({ invoices, onBack, onTransferVisaToC }: { invoices: Sta
   const [amountTolerancePercent, setAmountTolerancePercent] = useState(0.5);
   const [stageBAccountFilter, setStageBAccountFilter] = useState("all");
   const [stageBAmountSort, setStageBAmountSort] = useState<"none" | "asc" | "desc">("none");
+  const [stageBSwaps, setStageBSwaps] = useState<Record<string, boolean>>({ invoiceBank: false, transferBank: false, invoiceWallet: false, transferWallet: false });
   const sessionFileRef = useRef<HTMLInputElement>(null);
   const hasTransferredInvoices = invoices.some(invoice => invoice.category !== "فيزا");
 
@@ -629,10 +645,11 @@ function StageBPlatform({ invoices, onBack, onTransferVisaToC }: { invoices: Sta
 
   const invoiceData = useMemo<StageBInvoice[]>(() => {
     const sources = (["invoiceBank", "invoiceWallet"] as const).flatMap(source => {
+      const swap = stageBSwaps[source];
       return rows[source].map((row, index) => ({
         id: `${source}-${index}`, name: String(row[maps[source].name] ?? "").trim(),
-        originalName: String(row[maps[source].name] ?? "").trim(), amount: parseAmount(row[maps[source].paidAmount] || row[maps[source].amount]),
-        paidAmount: parseAmount(row[maps[source].paidAmount] || row[maps[source].amount]),
+        originalName: String(row[maps[source].name] ?? "").trim(), amount: parseAmount(swap ? (row[maps[source].receivedAmount] || row[maps[source].amount]) : (row[maps[source].paidAmount] || row[maps[source].amount])),
+        paidAmount: parseAmount(swap ? (row[maps[source].receivedAmount] || row[maps[source].amount]) : (row[maps[source].paidAmount] || row[maps[source].amount])),
         accountType: source === "invoiceBank" ? "بنك فلسطين" : "محفظة تجارية", userId: "",
         registrationTime: "", customerNumber: "", invoiceNumber: "",
         date: String(row[maps[source].date] ?? "").trim(), source: source === "invoiceBank" ? "فاتورة بنك فلسطين" : "فاتورة محفظة تجارية", raw: row
@@ -646,18 +663,19 @@ function StageBPlatform({ invoices, onBack, onTransferVisaToC }: { invoices: Sta
       registrationTime: invoice.registrationTime, customerNumber: invoice.customerNumber, invoiceNumber: invoice.invoiceNumber,
       date: "", source: invoice.category, raw: invoice.invoice
     }));
-  }, [rows, maps, invoices]);
+  }, [rows, maps, invoices, stageBSwaps]);
 
-  const transferData = useMemo<StageBTransfer[]>(() => (["transferBank", "transferWallet"] as const).flatMap(source =>
-    rows[source].map((row, index) => ({
+  const transferData = useMemo<StageBTransfer[]>(() => (["transferBank", "transferWallet"] as const).flatMap(source => {
+    const swap = stageBSwaps[source];
+    return rows[source].map((row, index) => ({
       id: `${source}-${index}`, name: String(row[maps[source].name] ?? "").trim(),
-      description: String(row[maps[source].name] ?? "").trim(), amount: parseAmount(row[maps[source].receivedAmount] || row[maps[source].amount]),
-      receivedAmount: parseAmount(row[maps[source].receivedAmount] || row[maps[source].amount]),
+      description: String(row[maps[source].name] ?? "").trim(), amount: parseAmount(swap ? (row[maps[source].paidAmount] || row[maps[source].amount]) : (row[maps[source].receivedAmount] || row[maps[source].amount])),
+      receivedAmount: parseAmount(swap ? (row[maps[source].paidAmount] || row[maps[source].amount]) : (row[maps[source].receivedAmount] || row[maps[source].amount])),
       accountType: source === "transferBank" ? "بنك فلسطين" : "محفظة تجارية",
       type: (source === "transferBank" ? "بنك فلسطين" : "محفظة تجارية") as StageBTransfer["type"],
       date: String(row[maps[source].date] ?? "").trim(), raw: row
-    })).filter(row => row.name || row.amount)
-  ), [rows, maps]);
+    })).filter(row => row.name || row.amount);
+  }), [rows, maps, stageBSwaps]);
 
   const runStageB = () => {
     if (!invoiceData.length) { setError(invoices.length ? "لا توجد فواتير مرحلة من قاعدة البيانات." : "ارفع ملفي فواتير بنك فلسطين والمحفظة التجارية."); return; }
@@ -854,12 +872,18 @@ function StageBPlatform({ invoices, onBack, onTransferVisaToC }: { invoices: Sta
     <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
       <h2 className="text-sm font-bold">{label}</h2>
       <DropZone file={files[source]} onFile={file => loadFile(source, file)} onClear={() => { setFiles(prev => ({ ...prev, [source]: null })); setHeaders(prev => ({ ...prev, [source]: [] })); setRows(prev => ({ ...prev, [source]: [] })); }} />
-      {!!headers[source].length && <div className="grid grid-cols-2 gap-2">
-        <Sel label="الاسم / البيان" headers={headers[source]} value={maps[source].name} onChange={value => setMaps(prev => ({ ...prev, [source]: { ...prev[source], name: value } }))} />
-        <Sel label="المبلغ المدفوع" headers={headers[source]} value={maps[source].paidAmount} onChange={value => setMaps(prev => ({ ...prev, [source]: { ...prev[source], paidAmount: value, amount: value } }))} />
-        <Sel label="المبلغ المستلم" headers={headers[source]} value={maps[source].receivedAmount} onChange={value => setMaps(prev => ({ ...prev, [source]: { ...prev[source], receivedAmount: value } }))} />
-        <Sel label="نوع الحساب" headers={headers[source]} value={maps[source].accountType} onChange={value => setMaps(prev => ({ ...prev, [source]: { ...prev[source], accountType: value } }))} />
-      </div>}
+      {!!headers[source].length && <>
+        <div className="grid grid-cols-2 gap-2">
+          <Sel label="الاسم / البيان" headers={headers[source]} value={maps[source].name} onChange={value => setMaps(prev => ({ ...prev, [source]: { ...prev[source], name: value } }))} />
+          <Sel label="المبلغ المدفوع" headers={headers[source]} value={maps[source].paidAmount} onChange={value => setMaps(prev => ({ ...prev, [source]: { ...prev[source], paidAmount: value, amount: value } }))} />
+          <Sel label="المبلغ المستلم" headers={headers[source]} value={maps[source].receivedAmount} onChange={value => setMaps(prev => ({ ...prev, [source]: { ...prev[source], receivedAmount: value } }))} />
+          <Sel label="نوع الحساب" headers={headers[source]} value={maps[source].accountType} onChange={value => setMaps(prev => ({ ...prev, [source]: { ...prev[source], accountType: value } }))} />
+        </div>
+        <label className="flex w-fit cursor-pointer items-center gap-2 text-xs text-slate-600">
+          <input type="checkbox" checked={stageBSwaps[source]} onChange={event => setStageBSwaps(prev => ({ ...prev, [source]: event.target.checked }))} className="rounded" />
+          عكس المدين والدائن
+        </label>
+      </>}
     </div>
   );
 
