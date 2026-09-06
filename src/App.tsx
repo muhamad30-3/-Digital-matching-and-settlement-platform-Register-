@@ -55,7 +55,7 @@ function resolveDebitCredit(
   return { debit, credit, rawAmount, type };
 }
 
-// ─── تخزين دائم ────────────────────────────────────────────────────────────────
+// ─── تخزين دائم (IndexedDB) ────────────────────────────────────────────────────
 interface AppStorage {
   get(key: string): Promise<{ value: string } | null>;
   set(key: string, value: string): Promise<void>;
@@ -67,6 +67,54 @@ interface StorageWindow extends Window {
   storage?: AppStorage;
 }
 
+const IDB_NAME = "recon_store";
+const IDB_STORE = "kv";
+let idbReady: Promise<IDBDatabase> | null = null;
+
+function openIDB(): Promise<IDBDatabase> {
+  if (idbReady) return idbReady;
+  idbReady = new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return idbReady;
+}
+
+async function idbGet<T>(key: string): Promise<T | undefined> {
+  const db = await openIDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readonly");
+    const req = tx.objectStore(IDB_STORE).get(key);
+    req.onsuccess = () => resolve(req.result as T | undefined);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbSet(key: string, value: unknown): Promise<void> {
+  const db = await openIDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    tx.objectStore(IDB_STORE).put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function idbDelete(key: string): Promise<void> {
+  const db = await openIDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    tx.objectStore(IDB_STORE).delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 async function storageGet<T>(key: string, fallback: T): Promise<T> {
   try {
     const w = window as StorageWindow;
@@ -74,12 +122,17 @@ async function storageGet<T>(key: string, fallback: T): Promise<T> {
       const res = await w.storage.get(key);
       return res ? (JSON.parse(res.value) as T) : fallback;
     }
-  } catch { /* المفتاح غير موجود أو خطأ - نكمل على localStorage */ }
+  } catch { /* المفتاح غير موجود أو خطأ - نكمل على IndexedDB/localStorage */ }
   try {
-    const raw = localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : fallback;
+    const val = await idbGet<T>(key);
+    return val !== undefined ? val : fallback;
   } catch {
-    return fallback;
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? (JSON.parse(raw) as T) : fallback;
+    } catch {
+      return fallback;
+    }
   }
 }
 async function storageSet(key: string, value: unknown): Promise<void> {
@@ -89,7 +142,13 @@ async function storageSet(key: string, value: unknown): Promise<void> {
       await w.storage.set(key, JSON.stringify(value));
       return;
     }
-  } catch (e) { console.error("storage.set فشل، سيتم استخدام localStorage:", e); }
+  } catch (e) { console.error("storage.set فشل، سيتم استخدام IndexedDB:", e); }
+  try {
+    await idbSet(key, value);
+    return;
+  } catch (e) {
+    console.error("IndexedDB فشل، محاولة localStorage:", e);
+  }
   try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { console.error("فشل الحفظ نهائياً:", e); }
 }
 async function storageDelete(key: string): Promise<void> {
@@ -97,6 +156,7 @@ async function storageDelete(key: string): Promise<void> {
     const w = window as StorageWindow;
     if (w?.storage?.delete) { await w.storage.delete(key); return; }
   } catch { /* تجاهل */ }
+  try { await idbDelete(key); return; } catch { /* تجاهل */ }
   try { localStorage.removeItem(key); } catch { /* تجاهل */ }
 }
 // ─── Visa detection ────────────────────────────────────────────────────────────
