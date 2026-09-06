@@ -37,7 +37,45 @@ function fmtNum(n: number) {
   return n.toLocaleString("ar-SA", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-// ─── تخزين دائم ────────────────────────────────────────────────────────────────
+// ─── تخزين دائم (IndexedDB) ────────────────────────────────────────────────────
+const IDB_NAME = "recon_store";
+const IDB_STORE = "kv";
+let idbReady: Promise<IDBDatabase> | null = null;
+
+function openIDB(): Promise<IDBDatabase> {
+  if (idbReady) return idbReady;
+  idbReady = new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return idbReady;
+}
+
+async function idbGet<T>(key: string): Promise<T | undefined> {
+  const db = await openIDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readonly");
+    const req = tx.objectStore(IDB_STORE).get(key);
+    req.onsuccess = () => resolve(req.result as T | undefined);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbSet(key: string, value: unknown): Promise<void> {
+  const db = await openIDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    tx.objectStore(IDB_STORE).put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 async function storageGet<T>(key: string, fallback: T): Promise<T> {
   try {
     const w = window as any;
@@ -47,15 +85,27 @@ async function storageGet<T>(key: string, fallback: T): Promise<T> {
     }
   } catch { /* */ }
   try {
-    const raw = localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : fallback;
-  } catch { return fallback; }
+    const val = await idbGet<T>(key);
+    return val !== undefined ? val : fallback;
+  } catch {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? (JSON.parse(raw) as T) : fallback;
+    } catch { return fallback; }
+  }
 }
+
 async function storageSet(key: string, value: unknown): Promise<void> {
   try {
     const w = window as any;
     if (w?.storage?.set) { await w.storage.set(key, JSON.stringify(value)); return; }
   } catch (e) { console.error("storage.set فشل:", e); }
+  try {
+    await idbSet(key, value);
+    return;
+  } catch (e) {
+    console.error("IndexedDB فشل، محاولة localStorage:", e);
+  }
   try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { console.error("فشل الحفظ:", e); }
 }
 
@@ -320,8 +370,8 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC }: { onBack: 
   const [invoiceFiles, setInvoiceFiles] = useState<Record<string, File | null>>({ bank: null, wallet: null, visa: null });
   const [invoiceHeaders, setInvoiceHeaders] = useState<Record<string, string[]>>({ bank: [], wallet: [], visa: [] });
   const [invoiceRows, setInvoiceRows] = useState<Record<string, Record<string, unknown>[]>>({ bank: [], wallet: [], visa: [] });
-  const [invoiceMaps, setInvoiceMaps] = useState<Record<string, { name: string; paidAmount: string; receivedAmount: string; accountType: string }>>({
-    bank: { name: "", paidAmount: "", receivedAmount: "", accountType: "" }, wallet: { name: "", paidAmount: "", receivedAmount: "", accountType: "" }, visa: { name: "", paidAmount: "", receivedAmount: "", accountType: "" }
+  const [invoiceMaps, setInvoiceMaps] = useState<Record<string, { name: string; paidAmount: string; receivedAmount: string; accountType: string; date: string; reference: string }>>({
+    bank: { name: "", paidAmount: "", receivedAmount: "", accountType: "", date: "", reference: "" }, wallet: { name: "", paidAmount: "", receivedAmount: "", accountType: "", date: "", reference: "" }, visa: { name: "", paidAmount: "", receivedAmount: "", accountType: "", date: "", reference: "" }
   });
   const [invoiceSwaps, setInvoiceSwaps] = useState<Record<string, boolean>>({ bank: false, wallet: false, visa: false });
   const [results, setResults] = useState<StageAResult[]>([]);
@@ -362,7 +412,9 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC }: { onBack: 
         name: autoDetect(parsed.headers, HINTS.name),
         paidAmount: detectCardPaidColumn(parsed.headers) || autoDetect(parsed.headers, HINTS.debit) || autoDetect(parsed.headers, ["amount", "مبلغ"]),
         receivedAmount: autoDetect(parsed.headers, HINTS.credit),
-        accountType: autoDetect(parsed.headers, HINTS.accountType)
+        accountType: autoDetect(parsed.headers, HINTS.accountType),
+        date: autoDetect(parsed.headers, HINTS.date),
+        reference: autoDetect(parsed.headers, HINTS.authNum)
       }}));
     } catch (e) { setError((e as Error).message); }
   };
@@ -480,18 +532,22 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC }: { onBack: 
   const renderInvoice = (source: "bank" | "wallet" | "visa", label: string) => (
     <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
       <h3 className="text-sm font-bold text-slate-800">{label}</h3>
-      <DropZone file={invoiceFiles[source]} onFile={file => loadInvoices(source, file)} onClear={() => { setInvoiceFiles(prev => ({ ...prev, [source]: null })); setInvoiceHeaders(prev => ({ ...prev, [source]: [] })); setInvoiceRows(prev => ({ ...prev, [source]: [] })); }} />
-      {!!invoiceHeaders[source].length && <>
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          <Sel label="اسم الزبون" headers={invoiceHeaders[source]} value={invoiceMaps[source].name} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], name: value } }))} />
-          <Sel label="المبالغ المدفوعة (Debit)" headers={invoiceHeaders[source]} value={invoiceMaps[source].paidAmount} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], paidAmount: value } }))} />
-          <Sel label="المبالغ المستلمة (Credit)" headers={invoiceHeaders[source]} value={invoiceMaps[source].receivedAmount} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], receivedAmount: value } }))} />
-          <Sel label="نوع الحساب" headers={invoiceHeaders[source]} value={invoiceMaps[source].accountType} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], accountType: value } }))} />
-        </div>
+      {!!invoiceHeaders[source].length && (
         <label className="flex w-fit cursor-pointer items-center gap-2 text-xs text-slate-600">
           <input type="checkbox" checked={invoiceSwaps[source]} onChange={event => setInvoiceSwaps(prev => ({ ...prev, [source]: event.target.checked }))} className="rounded" />
           عكس المدين والدائن
         </label>
+      )}
+      <DropZone file={invoiceFiles[source]} onFile={file => loadInvoices(source, file)} onClear={() => { setInvoiceFiles(prev => ({ ...prev, [source]: null })); setInvoiceHeaders(prev => ({ ...prev, [source]: [] })); setInvoiceRows(prev => ({ ...prev, [source]: [] })); }} />
+      {!!invoiceHeaders[source].length && <>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <Sel label="التاريخ" headers={invoiceHeaders[source]} value={invoiceMaps[source].date} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], date: value } }))} />
+          <Sel label="البيان / اسم الزبون" headers={invoiceHeaders[source]} value={invoiceMaps[source].name} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], name: value } }))} />
+          <Sel label="المبالغ المدفوعة (Debit)" headers={invoiceHeaders[source]} value={invoiceMaps[source].paidAmount} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], paidAmount: value } }))} />
+          <Sel label="المبالغ المستلمة (Credit)" headers={invoiceHeaders[source]} value={invoiceMaps[source].receivedAmount} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], receivedAmount: value } }))} />
+          <Sel label="نوع الحساب" headers={invoiceHeaders[source]} value={invoiceMaps[source].accountType} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], accountType: value } }))} />
+          <Sel label="المرجع / رقم الفاتورة" headers={invoiceHeaders[source]} value={invoiceMaps[source].reference} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], reference: value } }))} />
+        </div>
       </>}
     </div>
   );
@@ -1168,6 +1224,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
         setMatchedVisa(s.matchedVisa || []);
         setPendingVisaBank(s.pendingVisaBank || []);
         setRejectedPairs(new Set(s.rejectedPairs || []));
+        if (s.visaSwaps) setVisaSwaps(s.visaSwaps);
       }
       setSessionLoaded(true);
     })();
@@ -1183,7 +1240,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
         dailyHeaders, dailyRowsRaw, dailyMap,
         sonyHeaders, sonyRowsRaw, sonyMap,
         authHeaders, authRowsRaw, authMap,
-        matchedVisa, pendingVisaBank,
+        visaSwaps, matchedVisa, pendingVisaBank,
         rejectedPairs: Array.from(rejectedPairs),
       });
     }, 500);
@@ -1193,7 +1250,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
       dailyHeaders, dailyRowsRaw, dailyMap,
       sonyHeaders, sonyRowsRaw, sonyMap,
       authHeaders, authRowsRaw, authMap,
-      matchedVisa, pendingVisaBank, rejectedPairs]);
+      visaSwaps, matchedVisa, pendingVisaBank, rejectedPairs]);
 
   // ─── File loaders ──────────────────────────────────────────────────────────
   const loadBank = async (f: File) => {
@@ -1254,10 +1311,13 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
   }, []);
 
   const parsedBank = useMemo((): BankRow2[] => {
+    const swap = visaSwaps.bank;
     return bankRowsRaw.map((r, i) => {
       const desc = String(bankMap.desc ? r[bankMap.desc] : "").trim();
-      const debitRaw = Math.abs(toNum(bankMap.debit ? r[bankMap.debit] : 0));
-      const creditRaw = Math.abs(toNum(bankMap.credit ? r[bankMap.credit] : 0));
+      const dRaw = Math.abs(toNum(bankMap.debit ? r[bankMap.debit] : 0));
+      const cRaw = Math.abs(toNum(bankMap.credit ? r[bankMap.credit] : 0));
+      const debitRaw = swap ? cRaw : dRaw;
+      const creditRaw = swap ? dRaw : cRaw;
       let rawAmount = 0;
       let type: "مدفوع" | "مستلم" = "مستلم";
       if (debitRaw > 0 && creditRaw === 0) { rawAmount = debitRaw; type = "مدفوع"; }
@@ -1275,7 +1335,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
         orig: r,
       };
     }).filter((r): r is BankRow2 => r !== null);
-  }, [bankRowsRaw, bankMap, isVisaBankDesc]);
+  }, [bankRowsRaw, bankMap, isVisaBankDesc, visaSwaps.bank]);
 
   // فيزا بنك = مشتريات عمولة تجار المفرزة تلقائياً
   const visaBankRows = useMemo(() => parsedBank.filter(b => b.isVisaBank), [parsedBank]);
@@ -1283,11 +1343,14 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
 
   // ─── Parse أستاذ rows ──────────────────────────────────────────────────────
   const parsedAza = useMemo((): AzaRow[] => {
+    const swap = visaSwaps.aza;
     return azaRowsRaw.map((r, i) => {
       const rawName = String(azaMap.name ? r[azaMap.name] : "").trim();
       const name = rawName.replace(VISA_NUM_RE, "").replace(/\s+/g, " ").trim();
-      const debitRaw = Math.abs(toNum(azaMap.debit ? r[azaMap.debit] : 0));
-      const creditRaw = Math.abs(toNum(azaMap.credit ? r[azaMap.credit] : 0));
+      const dRaw = Math.abs(toNum(azaMap.debit ? r[azaMap.debit] : 0));
+      const cRaw = Math.abs(toNum(azaMap.credit ? r[azaMap.credit] : 0));
+      const debitRaw = swap ? cRaw : dRaw;
+      const creditRaw = swap ? dRaw : cRaw;
       let amount = 0;
       let type: "مدفوع" | "مستلم" = "مستلم";
       if (debitRaw > 0 && creditRaw === 0) { amount = debitRaw; type = "مدفوع"; }
@@ -1302,7 +1365,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
         orig: r,
       };
     }).filter((r): r is AzaRow => r !== null);
-  }, [azaRowsRaw, azaMap]);
+  }, [azaRowsRaw, azaMap, visaSwaps.aza]);
 
   // أستاذ فيزا = اللي فيها رقم فيزا (4 أرقام)
   const azaVisaRows = useMemo(() => parsedAza.filter(a => a.visaNumber), [parsedAza]);
@@ -1310,11 +1373,14 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
 
   // ─── Parse daily cashier rows ──────────────────────────────────────────────
   const parsedDaily = useMemo((): AzaRow[] => {
+    const swap = visaSwaps.daily;
     return dailyRowsRaw.map((r, i) => {
       const rawName = String(dailyMap.name ? r[dailyMap.name] : "").trim();
       const name = rawName.replace(VISA_NUM_RE, "").replace(/\s+/g, " ").trim();
-      const debitRaw = Math.abs(toNum(dailyMap.debit ? r[dailyMap.debit] : 0));
-      const creditRaw = Math.abs(toNum(dailyMap.credit ? r[dailyMap.credit] : 0));
+      const dRaw = Math.abs(toNum(dailyMap.debit ? r[dailyMap.debit] : 0));
+      const cRaw = Math.abs(toNum(dailyMap.credit ? r[dailyMap.credit] : 0));
+      const debitRaw = swap ? cRaw : dRaw;
+      const creditRaw = swap ? dRaw : cRaw;
       let amount = 0;
       let type: "مدفوع" | "مستلم" = "مستلم";
       if (debitRaw > 0 && creditRaw === 0) { amount = debitRaw; type = "مدفوع"; }
@@ -1329,7 +1395,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
         orig: r,
       };
     }).filter((r): r is AzaRow => r !== null);
-  }, [dailyRowsRaw, dailyMap]);
+  }, [dailyRowsRaw, dailyMap, visaSwaps.daily]);
 
   // الفرق: أستاذ - يومي = الـ50 فاتورة الزيادة (مش موجودة باليومي)
   const azaOnlyRows = useMemo(() => {
@@ -1339,12 +1405,15 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
 
   // ─── Parse سوني كاشير فيزا ─────────────────────────────────────────────────
   const parsedSony = useMemo((): SonyVisaRow[] => {
+    const swap = visaSwaps.sony;
     return sonyRowsRaw.map((r, i) => {
       const rawName = String(sonyMap.name ? r[sonyMap.name] : "").trim();
       const visaNum = extractVisaNumber(rawName);
       const name = rawName.replace(VISA_NUM_RE, "").replace(/\s+/g, " ").trim();
-      const debitRaw = Math.abs(toNum(sonyMap.debit ? r[sonyMap.debit] : 0));
-      const creditRaw = Math.abs(toNum(sonyMap.credit ? r[sonyMap.credit] : 0));
+      const dRaw = Math.abs(toNum(sonyMap.debit ? r[sonyMap.debit] : 0));
+      const cRaw = Math.abs(toNum(sonyMap.credit ? r[sonyMap.credit] : 0));
+      const debitRaw = swap ? cRaw : dRaw;
+      const creditRaw = swap ? dRaw : cRaw;
       let amount = 0;
       if (debitRaw > 0) amount = debitRaw;
       else if (creditRaw > 0) amount = creditRaw;
@@ -1355,7 +1424,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
         date: fmtDate(sonyMap.date ? r[sonyMap.date] : ""), orig: r,
       };
     }).filter((r): r is SonyVisaRow => r !== null);
-  }, [sonyRowsRaw, sonyMap]);
+  }, [sonyRowsRaw, sonyMap, visaSwaps.sony]);
 
   // ─── Parse رقم التفويض ─────────────────────────────────────────────────────
   const parsedAuth = useMemo(() => {
@@ -1863,6 +1932,12 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
                 </span>
               )}
             </h2>
+            {bankHeaders.length > 0 && (
+              <label className="flex w-fit cursor-pointer items-center gap-2 text-xs text-slate-600">
+                <input type="checkbox" checked={visaSwaps.bank} onChange={event => setVisaSwaps(prev => ({ ...prev, bank: event.target.checked }))} className="rounded" />
+                عكس المدين والدائن
+              </label>
+            )}
             <DropZone file={bankFile} onFile={loadBank} onClear={() => { setBankFile(null); setBankHeaders([]); setBankRowsRaw([]); }} />
             {bankHeaders.length > 0 && (
               <div className="grid grid-cols-2 gap-2">
@@ -1871,6 +1946,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
                 <Sel label="المبالغ المدفوعة (Debit)" headers={bankHeaders} value={bankMap.debit} onChange={v => setBankMap(m => ({ ...m, debit: v }))} />
                 <Sel label="المبالغ المستلمة (Credit)" headers={bankHeaders} value={bankMap.credit} onChange={v => setBankMap(m => ({ ...m, credit: v }))} />
                 <Sel label="نوع الحساب" headers={bankHeaders} value={bankMap.accountType} onChange={v => setBankMap(m => ({ ...m, accountType: v }))} />
+                <Sel label="المرجع / رقم الحوالة" headers={bankHeaders} value={bankMap.reference} onChange={v => setBankMap(m => ({ ...m, reference: v }))} />
               </div>
             )}
             {visaBankRows.length > 0 && (
@@ -1894,6 +1970,12 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
                 </span>
               )}
             </h2>
+            {azaHeaders.length > 0 && (
+              <label className="flex w-fit cursor-pointer items-center gap-2 text-xs text-slate-600">
+                <input type="checkbox" checked={visaSwaps.aza} onChange={event => setVisaSwaps(prev => ({ ...prev, aza: event.target.checked }))} className="rounded" />
+                عكس المدين والدائن
+              </label>
+            )}
             <DropZone file={azaFile} onFile={loadAza} onClear={() => { setAzaFile(null); setAzaHeaders([]); setAzaRowsRaw([]); }} />
             {azaHeaders.length > 0 && (
               <div className="grid grid-cols-2 gap-2">
@@ -1902,6 +1984,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
                 <Sel label="المبالغ المدفوعة (Debit)" headers={azaHeaders} value={azaMap.debit} onChange={v => setAzaMap(m => ({ ...m, debit: v }))} />
                 <Sel label="المبالغ المستلمة (Credit)" headers={azaHeaders} value={azaMap.credit} onChange={v => setAzaMap(m => ({ ...m, credit: v }))} />
                 <Sel label="نوع الحساب" headers={azaHeaders} value={azaMap.accountType} onChange={v => setAzaMap(m => ({ ...m, accountType: v }))} />
+                <Sel label="المرجع / رقم الحوالة" headers={azaHeaders} value={azaMap.reference} onChange={v => setAzaMap(m => ({ ...m, reference: v }))} />
               </div>
             )}
           </div>
@@ -1916,6 +1999,12 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
                 </span>
               )}
             </h2>
+            {dailyHeaders.length > 0 && (
+              <label className="flex w-fit cursor-pointer items-center gap-2 text-xs text-slate-600">
+                <input type="checkbox" checked={visaSwaps.daily} onChange={event => setVisaSwaps(prev => ({ ...prev, daily: event.target.checked }))} className="rounded" />
+                عكس المدين والدائن
+              </label>
+            )}
             <DropZone file={dailyFile} onFile={loadDaily} onClear={() => { setDailyFile(null); setDailyHeaders([]); setDailyRowsRaw([]); }} />
             {dailyHeaders.length > 0 && (
               <div className="grid grid-cols-2 gap-2">
@@ -1924,6 +2013,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
                 <Sel label="المبالغ المدفوعة (Debit)" headers={dailyHeaders} value={dailyMap.debit} onChange={v => setDailyMap(m => ({ ...m, debit: v }))} />
                 <Sel label="المبالغ المستلمة (Credit)" headers={dailyHeaders} value={dailyMap.credit} onChange={v => setDailyMap(m => ({ ...m, credit: v }))} />
                 <Sel label="نوع الحساب" headers={dailyHeaders} value={dailyMap.accountType} onChange={v => setDailyMap(m => ({ ...m, accountType: v }))} />
+                <Sel label="المرجع / رقم الحوالة" headers={dailyHeaders} value={dailyMap.reference} onChange={v => setDailyMap(m => ({ ...m, reference: v }))} />
               </div>
             )}
           </div>
@@ -1938,6 +2028,12 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
                 </span>
               )}
             </h2>
+            {sonyHeaders.length > 0 && (
+              <label className="flex w-fit cursor-pointer items-center gap-2 text-xs text-slate-600">
+                <input type="checkbox" checked={visaSwaps.sony} onChange={event => setVisaSwaps(prev => ({ ...prev, sony: event.target.checked }))} className="rounded" />
+                عكس المدين والدائن
+              </label>
+            )}
             <DropZone file={sonyFile} onFile={loadSony} onClear={() => { setSonyFile(null); setSonyHeaders([]); setSonyRowsRaw([]); }} />
             {sonyHeaders.length > 0 && (
               <div className="grid grid-cols-2 gap-2">
@@ -1945,6 +2041,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
                 <Sel label="البيان (اسم الزبون)" headers={sonyHeaders} value={sonyMap.name} onChange={v => setSonyMap(m => ({ ...m, name: v }))} />
                 <Sel label="المبالغ المدفوعة (Debit)" headers={sonyHeaders} value={sonyMap.debit} onChange={v => setSonyMap(m => ({ ...m, debit: v }))} />
                 <Sel label="المبالغ المستلمة (Credit)" headers={sonyHeaders} value={sonyMap.credit} onChange={v => setSonyMap(m => ({ ...m, credit: v }))} />
+                <Sel label="نوع الحساب" headers={sonyHeaders} value={sonyMap.accountType} onChange={v => setSonyMap(m => ({ ...m, accountType: v }))} />
                 <Sel label="رقم التفويض" headers={sonyHeaders} value={sonyMap.authNum} onChange={v => setSonyMap(m => ({ ...m, authNum: v }))} />
               </div>
             )}
@@ -1960,12 +2057,19 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
                 </span>
               )}
             </h2>
+            {authHeaders.length > 0 && (
+              <label className="flex w-fit cursor-pointer items-center gap-2 text-xs text-slate-600">
+                <input type="checkbox" checked={visaSwaps.auth} onChange={event => setVisaSwaps(prev => ({ ...prev, auth: event.target.checked }))} className="rounded" />
+                عكس المدين والدائن
+              </label>
+            )}
             <DropZone file={authFile} onFile={loadAuth} onClear={() => { setAuthFile(null); setAuthHeaders([]); setAuthRowsRaw([]); }} />
             {authHeaders.length > 0 && (
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 gap-2">
                 <Sel label="الاسم" headers={authHeaders} value={authMap.name} onChange={v => setAuthMap(m => ({ ...m, name: v }))} />
                 <Sel label="رقم التفويض" headers={authHeaders} value={authMap.authNum} onChange={v => setAuthMap(m => ({ ...m, authNum: v }))} />
                 <Sel label="المبلغ" headers={authHeaders} value={authMap.amount} onChange={v => setAuthMap(m => ({ ...m, amount: v }))} />
+                <Sel label="التاريخ" headers={authHeaders} value={authMap.date} onChange={v => setAuthMap(m => ({ ...m, date: v }))} />
               </div>
             )}
           </div>
