@@ -2,13 +2,7 @@
 import React, { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import * as XLSX from "xlsx";
 import Reconciliation2, { type StageAResult } from "./Reconciliation2";
-import {
-  Upload, FileSpreadsheet, Download, ChevronDown, X,
-  Trash2, AlertTriangle, Check,
-  Search, Link2, Link2Off, ChevronLeft, ChevronRight, CreditCard,
-  Sparkles, Info, Save, Shield, FolderOpen, FolderPlus, RotateCcw, FolderMinus,
-  GripVertical, Landmark, Users
-} from "lucide-react";
+import { Upload, FileSpreadsheet, Download, ChevronDown, X, Trash2, TriangleAlert as AlertTriangle, Check, Search, Link2, Link2Off, ChevronLeft, ChevronRight, CreditCard, Sparkles, Info, Save, Shield, FolderOpen, FolderPlus, RotateCcw, FolderMinus, GripVertical, Landmark, Users } from "lucide-react";
 
 // ─── Excel helpers ────────────────────────────────────────────────────────────
 function readFileBuf(f: File): Promise<ArrayBuffer> {
@@ -38,6 +32,27 @@ function toNum(v: unknown): number {
 }
 function fmtNum(n: number) {
   return n.toLocaleString("ar-SA", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function resolveDebitCredit(
+  row: Record<string, unknown>,
+  debitCol: string,
+  creditCol: string,
+  swap: boolean
+): { debit: number; credit: number; rawAmount: number; type: "مدفوع" | "مستلم" } {
+  const debitRaw = Math.abs(toNum(debitCol ? row[debitCol] : 0));
+  const creditRaw = Math.abs(toNum(creditCol ? row[creditCol] : 0));
+  const debit = swap ? creditRaw : debitRaw;
+  const credit = swap ? debitRaw : creditRaw;
+
+  let rawAmount = 0;
+  let type: "مدفوع" | "مستلم" = "مستلم";
+
+  if (debit > 0 && credit === 0) { rawAmount = debit; type = "مدفوع"; }
+  else if (credit > 0 && debit === 0) { rawAmount = credit; type = "مستلم"; }
+  else if (debit > 0 && credit > 0) { rawAmount = debit; type = "مدفوع"; }
+
+  return { debit, credit, rawAmount, type };
 }
 
 // ─── تخزين دائم ────────────────────────────────────────────────────────────────
@@ -1102,7 +1117,7 @@ function ManualWorkbench({
           <button onClick={handleMatch}
             className="w-full py-3.5 rounded-xl font-medium flex items-center justify-center gap-2 text-sm transition-colors bg-green-600 hover:bg-green-700 text-white">
             <Save className="w-5 h-5"/>
-            حفظ {selectedBankIds.size} حوالة بنكية ↔ {selectedCashierIds.size} فاتورة كاشier (تؤكد فوراً)
+            حفظ {selectedBankIds.size} حوالة بنكية ↔ {selectedCashierIds.size} فاتورة كاشير (تؤكد فوراً)
             {!amtMatch&&<span className="text-xs opacity-80">(مجاميع مختلفة)</span>}
           </button>
         )}
@@ -1629,10 +1644,28 @@ export default function App() {
   const [walletBankHeaders, setWalletBankHeaders] = useState<string[]>([]);
   const [walletBankRows, setWalletBankRows] = useState<Record<string,unknown>[]>([]);
   const [walletBankMap, setWalletBankMap] = useState({ date:"", desc:"", debit:"", credit:"", ref:"" });
+  const [walletBankSwap, setWalletBankSwap] = useState(false);
   const [walletCashFile, setWalletCashFile] = useState<File|null>(null);
   const [walletCashHeaders, setWalletCashHeaders] = useState<string[]>([]);
   const [walletCashRows, setWalletCashRows] = useState<Record<string,unknown>[]>([]);
   const [walletCashMap, setWalletCashMap] = useState({ date:"", name:"", debit:"", credit:"", ref:"" });
+  const [walletCashSwap, setWalletCashSwap] = useState(false);
+
+  // ─── File snapshots for restore functionality ──────────────────────────────
+  interface FileSnapshot {
+    label: string;
+    headers: string[];
+    rows: Record<string, unknown>[];
+    savedAt: string;
+  }
+  const [bankFileSnapshots, setBankFileSnapshots] = useState<FileSnapshot[]>([]);
+  const [cashFileSnapshots, setCashFileSnapshots] = useState<FileSnapshot[]>([]);
+  const [walletBankFileSnapshots, setWalletBankFileSnapshots] = useState<FileSnapshot[]>([]);
+  const [walletCashFileSnapshots, setWalletCashFileSnapshots] = useState<FileSnapshot[]>([]);
+  const [showBankSnapshots, setShowBankSnapshots] = useState(false);
+  const [showCashSnapshots, setShowCashSnapshots] = useState(false);
+  const [showWalletBankSnapshots, setShowWalletBankSnapshots] = useState(false);
+  const [showWalletCashSnapshots, setShowWalletCashSnapshots] = useState(false);
 
   const [loading, setLoading] = useState(false);
   const [error, setError]     = useState<string|null>(null);
@@ -1694,9 +1727,15 @@ export default function App() {
         setWalletBankHeaders(session.walletBankHeaders || []);
         setWalletBankRows(session.walletBankRows || []);
         setWalletBankMap({ date:"", desc:"", debit:"", credit:"", ref:"", ...(session.walletBankMap || {}) });
+        setWalletBankSwap(!!session.walletBankSwap);
         setWalletCashHeaders(session.walletCashHeaders || []);
         setWalletCashRows(session.walletCashRows || []);
         setWalletCashMap({ date:"", name:"", debit:"", credit:"", ref:"", ...(session.walletCashMap || {}) });
+        setWalletCashSwap(!!session.walletCashSwap);
+        setBankFileSnapshots(session.bankFileSnapshots || []);
+        setCashFileSnapshots(session.cashFileSnapshots || []);
+        setWalletBankFileSnapshots(session.walletBankFileSnapshots || []);
+        setWalletCashFileSnapshots(session.walletCashFileSnapshots || []);
         setManualGroups(session.manualGroups || []);
         setSavedMatches(session.savedMatches || []);
         setNameAliases(session.nameAliases || {});
@@ -1721,8 +1760,9 @@ export default function App() {
       storageSet("current_session", {
         bankHeaders, bankRowsRaw, bankMap, bankSwap, bankFileSessionId,
         cashHeaders, cashRowsRaw, cashMap, cashSwap, cashFileSessionId,
-        walletBankHeaders, walletBankRows, walletBankMap,
-        walletCashHeaders, walletCashRows, walletCashMap,
+        walletBankHeaders, walletBankRows, walletBankMap, walletBankSwap,
+        walletCashHeaders, walletCashRows, walletCashMap, walletCashSwap,
+        bankFileSnapshots, cashFileSnapshots, walletBankFileSnapshots, walletCashFileSnapshots,
         manualGroups, savedMatches, nameAliases,
         rejectedPairs: Array.from(rejectedPairs),
         visaItems, heldItems, returnedHeldBank, returnedHeldCashier, rejectedSpecialCashierIds, advancedResults
@@ -1732,8 +1772,9 @@ export default function App() {
   }, [
     sessionLoaded, bankHeaders, bankRowsRaw, bankMap, bankSwap, bankFileSessionId,
     cashHeaders, cashRowsRaw, cashMap, cashSwap, cashFileSessionId,
-    walletBankHeaders, walletBankRows, walletBankMap,
-    walletCashHeaders, walletCashRows, walletCashMap,
+    walletBankHeaders, walletBankRows, walletBankMap, walletBankSwap,
+    walletCashHeaders, walletCashRows, walletCashMap, walletCashSwap,
+    bankFileSnapshots, cashFileSnapshots, walletBankFileSnapshots, walletCashFileSnapshots,
     manualGroups, savedMatches, nameAliases, rejectedPairs,
     visaItems, heldItems, returnedHeldBank, returnedHeldCashier, rejectedSpecialCashierIds, advancedResults
   ]);
@@ -1745,6 +1786,7 @@ export default function App() {
       setBankH(headers);setBankRows(rows);
       setBankMap({date:autoDetect(headers,HINTS.date),desc:autoDetect(headers,HINTS.desc),debit:autoDetect(headers,HINTS.debit),credit:autoDetect(headers,HINTS.credit),accountType:autoDetect(headers,HINTS.accountType),ref:autoDetect(headers,HINTS.ref)});
       setBankFileSessionId(id => id + 1);
+      setBankFileSnapshots(prev => [{ label: f.name, headers, rows, savedAt: new Date().toLocaleString("ar-SA") }, ...prev].slice(0, 5));
     } catch(e){setError((e as Error).message);}
   };
   const loadCash=async(f:File)=>{
@@ -1755,6 +1797,7 @@ export default function App() {
       setCashH(headers);setCashRows(rows);
       setCashMap({date:autoDetect(headers,HINTS.date),name:autoDetect(headers,HINTS.name),debit:autoDetect(headers,HINTS.debit),credit:autoDetect(headers,HINTS.credit),accountType:autoDetect(headers,HINTS.accountType),ref:autoDetect(headers,HINTS.ref)});
       setCashFileSessionId(id => id + 1);
+      setCashFileSnapshots(prev => [{ label: f.name, headers, rows, savedAt: new Date().toLocaleString("ar-SA") }, ...prev].slice(0, 5));
     } catch(e){setError((e as Error).message);}
   };
   const loadWalletBank = async (f: File) => {
@@ -1763,6 +1806,7 @@ export default function App() {
       const { headers, rows } = parseSheet(await readFileBuf(f));
       setWalletBankHeaders(headers); setWalletBankRows(rows);
       setWalletBankMap({ date:autoDetect(headers,HINTS.date), desc:autoDetect(headers,HINTS.desc), debit:autoDetect(headers,HINTS.debit), credit:autoDetect(headers,HINTS.credit), ref:autoDetect(headers,HINTS.ref) });
+      setWalletBankFileSnapshots(prev => [{ label: f.name, headers, rows, savedAt: new Date().toLocaleString("ar-SA") }, ...prev].slice(0, 5));
     } catch (e) { setError((e as Error).message); }
   };
   const loadWalletCash = async (f: File) => {
@@ -1772,25 +1816,14 @@ export default function App() {
       const { headers, rows } = parseSheet(await readFileBuf(f));
       setWalletCashHeaders(headers); setWalletCashRows(rows);
       setWalletCashMap({ date:autoDetect(headers,HINTS.date), name:autoDetect(headers,HINTS.name), debit:autoDetect(headers,HINTS.debit), credit:autoDetect(headers,HINTS.credit), ref:autoDetect(headers,HINTS.ref) });
+      setWalletCashFileSnapshots(prev => [{ label: f.name, headers, rows, savedAt: new Date().toLocaleString("ar-SA") }, ...prev].slice(0, 5));
     } catch (e) { setError((e as Error).message); }
   };
 
   const parsedBank = useMemo(():BankRow[]=>{
     return bankRowsRaw.map((r,i)=>{
-      const debitRaw = Math.abs(toNum(bankMap.debit ? r[bankMap.debit] : 0));
-      const creditRaw = Math.abs(toNum(bankMap.credit ? r[bankMap.credit] : 0));
-      const debit = bankSwap ? creditRaw : debitRaw;
-      const credit = bankSwap ? debitRaw : creditRaw;
-
-      let rawAmount = 0;
-      let type: "مدفوع" | "مستلم" = "مستلم";
-
-      if (debit > 0 && credit === 0) { rawAmount = debit; type = "مدفوع"; }
-      else if (credit > 0 && debit === 0) { rawAmount = credit; type = "مستلم"; }
-      else if (debit > 0 && credit > 0) { rawAmount = debit; type = "مدفوع"; }
-
+      const { debit, credit, rawAmount, type } = resolveDebitCredit(r, bankMap.debit, bankMap.credit, bankSwap);
       if (rawAmount === 0) return null;
-
       return {
         id:i, date:fmtDate(bankMap.date?r[bankMap.date]:""),
         description:String(bankMap.desc?r[bankMap.desc]:"").trim(),
@@ -1803,32 +1836,19 @@ export default function App() {
   },[bankRowsRaw,bankMap,bankSwap]);
 
   const parseWalletBankRows = useMemo(():BankRow[] => walletBankRows.map((r,i) => {
-    const debitRaw = Math.abs(toNum(walletBankMap.debit ? r[walletBankMap.debit] : 0));
-    const creditRaw = Math.abs(toNum(walletBankMap.credit ? r[walletBankMap.credit] : 0));
-    const rawAmount = debitRaw || creditRaw;
+    const { debit, credit, rawAmount, type } = resolveDebitCredit(r, walletBankMap.debit, walletBankMap.credit, walletBankSwap);
     if (!rawAmount) return null;
-    return { id: 1000000 + i, date:fmtDate(walletBankMap.date ? r[walletBankMap.date] : ""), description:String(walletBankMap.desc ? r[walletBankMap.desc] : "").trim(), debit:debitRaw, credit:creditRaw, rawAmount, type:debitRaw ? "مدفوع" : "مستلم", accountType:"محفظة تجارية", ref:String(walletBankMap.ref ? r[walletBankMap.ref] : "").trim(), orig:r };
-  }).filter((r): r is BankRow => r !== null), [walletBankRows, walletBankMap]);
+    return { id: 1000000 + i, date:fmtDate(walletBankMap.date ? r[walletBankMap.date] : ""), description:String(walletBankMap.desc ? r[walletBankMap.desc] : "").trim(), debit, credit, rawAmount, type, accountType:"محفظة تجارية", ref:String(walletBankMap.ref ? r[walletBankMap.ref] : "").trim(), orig:r };
+  }).filter((r): r is BankRow => r !== null), [walletBankRows, walletBankMap, walletBankSwap]);
 
   const parsedCashier = useMemo(():CashierRow[]=>{
     const rows = cashRowsRaw.map((r,i)=>{
       const rawName=String(cashMap.name?r[cashMap.name]:"").trim();
       const {name,notes}=parseCashierName(rawName);
       const {splitExpr,matchAmount:ma}=parseNotes(notes);
-      const debitRaw=Math.abs(toNum(cashMap.debit?r[cashMap.debit]:0));
-      const creditRaw=Math.abs(toNum(cashMap.credit?r[cashMap.credit]:0));
-      const debit = cashSwap ? creditRaw : debitRaw;
-      const credit = cashSwap ? debitRaw : creditRaw;
-
-      let amount = 0;
-      let type: "مدفوع" | "مستلم" = "مستلم";
-
-      if (debit > 0 && credit === 0) { amount = debit; type = "مدفوع"; }
-      else if (credit > 0 && debit === 0) { amount = credit; type = "مستلم"; }
-      else if (debit > 0 && credit > 0) { amount = debit; type = "مدفوع"; }
-
+      const { debit, credit, rawAmount, type } = resolveDebitCredit(r, cashMap.debit, cashMap.credit, cashSwap);
+      const amount = rawAmount;
       if (amount === 0 && !ma) return null;
-
       return {
         id:i, rawName, name, notes, splitExpr, debit, credit, amount,
         matchAmount: ma ?? amount, type,
@@ -1845,28 +1865,39 @@ export default function App() {
     const rawName = String(walletCashMap.name ? r[walletCashMap.name] : "").trim();
     const { name, notes } = parseCashierName(rawName);
     const { splitExpr, matchAmount: ma } = parseNotes(notes);
-    const debit = Math.abs(toNum(walletCashMap.debit ? r[walletCashMap.debit] : 0));
-    const credit = Math.abs(toNum(walletCashMap.credit ? r[walletCashMap.credit] : 0));
-    const amount = debit || credit || ma || 0;
+    const { debit, credit, rawAmount, type } = resolveDebitCredit(r, walletCashMap.debit, walletCashMap.credit, walletCashSwap);
+    const amount = rawAmount || ma || 0;
     if (!amount) return null;
-    return { id: 2000000 + i, rawName, name, notes, splitExpr, debit, credit, amount, matchAmount:ma ?? amount, type:debit ? "مدفوع" : "مستلم", accountType:"محفظة تجارية", ref:String(walletCashMap.ref ? r[walletCashMap.ref] : "").trim(), date:fmtDate(walletCashMap.date ? r[walletCashMap.date] : ""), orig:r };
-  }).filter((r): r is CashierRow => r !== null), [walletCashRows, walletCashMap]);
+    return { id: 2000000 + i, rawName, name, notes, splitExpr, debit, credit, amount, matchAmount:ma ?? amount, type, accountType:"محفظة تجارية", ref:String(walletCashMap.ref ? r[walletCashMap.ref] : "").trim(), date:fmtDate(walletCashMap.date ? r[walletCashMap.date] : ""), orig:r };
+  }).filter((r): r is CashierRow => r !== null), [walletCashRows, walletCashMap, walletCashSwap]);
 
   const heldBankKeys = useMemo(() => new Set(heldItems.filter(h=>h.kind==="bank").map(h => `${h.fileSessionId}:${h.refId}`)), [heldItems]);
   const heldCashierKeys = useMemo(() => new Set(heldItems.filter(h=>h.kind==="cashier").map(h => `${h.fileSessionId}:${h.refId}`)), [heldItems]);
+  // Wallet bank/cashier rows and Stage A invoice rows don't have their own "file session" concept,
+  // so they're matched purely by id here (ids are unique per source thanks to the 1,000,000/2,000,000/3,000,000 offsets).
+  const heldBankIds = useMemo(() => new Set(heldItems.filter(h=>h.kind==="bank").map(h => h.refId)), [heldItems]);
+  const heldCashierIds = useMemo(() => new Set(heldItems.filter(h=>h.kind==="cashier").map(h => h.refId)), [heldItems]);
 
   const activeBank = useMemo(
-    () => [...parsedBank.filter(b => !heldBankKeys.has(`${bankFileSessionId}:${b.id}`)), ...parseWalletBankRows, ...returnedHeldBank],
-    [parsedBank, parseWalletBankRows, heldBankKeys, bankFileSessionId, returnedHeldBank]
+    () => [
+      ...parsedBank.filter(b => !heldBankKeys.has(`${bankFileSessionId}:${b.id}`)),
+      ...parseWalletBankRows.filter(b => !heldBankIds.has(b.id)),
+      ...returnedHeldBank
+    ],
+    [parsedBank, parseWalletBankRows, heldBankKeys, heldBankIds, bankFileSessionId, returnedHeldBank]
   );
   const activeCashier = useMemo(
-    () => [...(stageAInvoices.length ? stageAInvoices.map((invoice, index) => ({
-      id: 3000000 + index, rawName: invoice.originalName, name: invoice.name, notes: invoice.issue, splitExpr: "",
-      debit: invoice.amount, credit: 0, amount: invoice.amount, matchAmount: invoice.amount,
-      type: "مدفوع" as const, accountType: invoice.source === "محفظة تجارية" ? "محفظة تجارية" : "بنك فلسطين",
-      ref: invoice.invoiceNumber, date: invoice.registrationTime, orig: invoice.invoice
-    })) : parsedCashier.filter(c => !heldCashierKeys.has(`${cashFileSessionId}:${c.id}`))), ...parsedWalletCashier, ...returnedHeldCashier],
-    [stageAInvoices, parsedCashier, parsedWalletCashier, heldCashierKeys, cashFileSessionId, returnedHeldCashier]
+    () => [
+      ...(stageAInvoices.length ? stageAInvoices.map((invoice, index) => ({
+        id: 3000000 + index, rawName: invoice.originalName, name: invoice.name, notes: invoice.issue, splitExpr: "",
+        debit: invoice.amount, credit: 0, amount: invoice.amount, matchAmount: invoice.amount,
+        type: "مدفوع" as const, accountType: invoice.source === "محفظة تجارية" ? "محفظة تجارية" : "بنك فلسطين",
+        ref: invoice.invoiceNumber, date: invoice.registrationTime, orig: invoice.invoice
+      })).filter(c => !heldCashierIds.has(c.id)) : parsedCashier.filter(c => !heldCashierKeys.has(`${cashFileSessionId}:${c.id}`))),
+      ...parsedWalletCashier.filter(c => !heldCashierIds.has(c.id)),
+      ...returnedHeldCashier
+    ],
+    [stageAInvoices, parsedCashier, parsedWalletCashier, heldCashierKeys, heldCashierIds, cashFileSessionId, returnedHeldCashier]
   );
 
   const savedKeys = useMemo(() => new Set(savedMatches.map(s => `${s.cashierId}-${s.bankId}`)), [savedMatches]);
@@ -1996,7 +2027,6 @@ export default function App() {
   const handleSaveMatch = (cashierRow: CashierRow, bankRow: BankRow, note?: string) => {
     const pairKey = `${cashierRow.id}-${bankRow.id}`;
     if (savedKeys.has(pairKey)) return;
-    skipNextAutoReconcile.current = true;
 
     const isAmountDiff = Math.abs(bankRow.rawAmount - cashierRow.amount) > 0.01;
     const ms = advancedMatchCheck(cashierRow.name, bankRow.description);
@@ -2023,13 +2053,6 @@ export default function App() {
     };
 
     setSavedMatches(prev => [...prev, newSaved]);
-    setResults(prev => prev
-      ? prev
-        .filter(result => result.type !== "pending" || (result.cashier.id === cashierRow.id && result.bank.id === bankRow.id))
-        .map(result => result.type === "pending" && result.cashier.id === cashierRow.id && result.bank.id === bankRow.id
-          ? { type: "saved", cashier: cashierRow, bank: bankRow, savedMatch: newSaved }
-          : result)
-      : prev);
     if (isNameDiff) {
       setNameAliases(prev => ({ ...prev, [smartNameKey(cashierRow.name)]: smartNameKey(smartAliasTarget(cashierRow.name, bankRow.description)) }));
     }
@@ -2079,20 +2102,9 @@ export default function App() {
       });
     });
     if (!newSaved.length) return;
-    skipNextAutoReconcile.current = true;
     setSavedMatches(prev => [...prev, ...newSaved]);
-    const savedPairKeys = new Set(newSaved.map(s => `${s.cashierId}-${s.bankId}`));
     const savedCashierIdsNow = new Set(newSaved.map(s => s.cashierId));
     const savedBankIdsNow = new Set(newSaved.map(s => s.bankId));
-    setResults(prev => prev
-      ? prev
-        .filter(result => result.type !== "pending" || savedPairKeys.has(`${result.cashier.id}-${result.bank.id}`))
-        .map(result => {
-          if (result.type !== "pending") return result;
-          const saved = newSaved.find(item => item.cashierId === result.cashier.id && item.bankId === result.bank.id);
-          return saved ? { type: "saved", cashier: result.cashier, bank: result.bank, savedMatch: saved } : result;
-        })
-      : prev);
     const aliasUpdates: Record<string, string> = {};
     pairs.forEach(({ cashier, bank }) => {
       const ms = advancedMatchCheck(cashier.name, bank.description);
@@ -2292,15 +2304,6 @@ export default function App() {
     const groupPairKeys = new Set(newSaved.map(s => `${s.cashierId}-${s.bankId}`));
     const groupCashierIds = new Set(newSaved.map(s => s.cashierId));
     const groupBankIds = new Set(newSaved.map(s => s.bankId));
-    setResults(prev => prev
-      ? prev
-        .filter(result => result.type !== "pending" || groupPairKeys.has(`${result.cashier.id}-${result.bank.id}`))
-        .map(result => {
-          if (result.type !== "pending") return result;
-          const saved = newSaved.find(item => item.cashierId === result.cashier.id && item.bankId === result.bank.id);
-          return saved ? { type: "saved", cashier: result.cashier, bank: result.bank, savedMatch: saved } : result;
-        })
-      : prev);
     setManualGroups(prev => [...prev, g]);
     // Cross-tab sync: remove from advanced results and pending selection
     setAdvancedResults(prev => prev.filter(a => !groupCashierIds.has(a.cashier.id) && !groupBankIds.has(a.bank.id)));
@@ -2321,7 +2324,11 @@ export default function App() {
   };
 
   const handleHoldCashier = (c: CashierRow, note?: string) => {
-    if (heldItems.some(h => h.kind === "cashier" && h.refId === c.id && h.fileSessionId === cashFileSessionId)) {
+    const isRegularRow = c.id < 1000000;
+    const alreadyHeld = heldItems.some(h =>
+      h.kind === "cashier" && h.refId === c.id && (!isRegularRow || h.fileSessionId === cashFileSessionId)
+    );
+    if (alreadyHeld) {
       setToast("هذه الفاتورة موجودة بالفعل في المعلقات.");
       return;
     }
@@ -2338,7 +2345,11 @@ export default function App() {
     setExpandedUnmatchedCashier(null);
   };
   const handleHoldBank = (b: BankRow, note?: string) => {
-    if (heldItems.some(h => h.kind === "bank" && h.refId === b.id && h.fileSessionId === bankFileSessionId)) {
+    const isRegularRow = b.id < 1000000;
+    const alreadyHeld = heldItems.some(h =>
+      h.kind === "bank" && h.refId === b.id && (!isRegularRow || h.fileSessionId === bankFileSessionId)
+    );
+    if (alreadyHeld) {
       setToast("هذه الحوالة موجودة بالفعل في المعلقات.");
       return;
     }
@@ -2691,7 +2702,7 @@ export default function App() {
         {toast && <div className="fixed bottom-5 left-5 z-50 flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-3 text-sm text-white shadow-xl"><Check className="h-4 w-4 text-green-300" />{toast}</div>}
 
         <div className="flex flex-wrap items-center gap-3 justify-between">
-          <div><h1 className="text-xl font-bold">منصة التسوية الذكية</h1><p className="mt-1 text-xs text-muted-foreground">مراجعة مالية أسرع، بقرارات قابلة للتتبع</p></div>
+          <div><h1 className="text-xl font-bold">منصة التسويةوالمطابقة الذكية</h1><p className="mt-1 text-xs text-muted-foreground">مراجعة مالية أسرع، بقرارات قابلة للتتبع</p></div>
           <div className="flex items-center gap-2 flex-wrap">
           {mainMode === "stageB" && <button onClick={() => { setMainMode("default"); setPage("recon2"); }}
             className="flex items-center gap-2 rounded-lg bg-teal-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-teal-700">
@@ -2792,7 +2803,7 @@ export default function App() {
               <div className="grid grid-cols-2 gap-2">
                 <Sel label="التاريخ" headers={bankHeaders} value={bankMap.date} onChange={v => setBankMap(m => ({ ...m, date: v }))} />
                 <Sel label="الإيضاحات / البيان" headers={bankHeaders} value={bankMap.desc} onChange={v => setBankMap(m => ({ ...m, desc: v }))} />
-                <Sel label="المبالغ المدفوعة (Debit)" headers={bankHeaders} value={bankMap.debit} onChange={v => setBankMap(m => ({ ...m, debit: v }))} />
+                <Sel label="المبالغ المدفوعة" headers={bankHeaders} value={bankMap.debit} onChange={v => setBankMap(m => ({ ...m, debit: v }))} />
                 <Sel label="المبالغ المستلمة (Credit)" headers={bankHeaders} value={bankMap.credit} onChange={v => setBankMap(m => ({ ...m, credit: v }))} />
                 <Sel label="نوع الحساب (بنك فلسطين / محفظة...)" headers={bankHeaders} value={bankMap.accountType} onChange={v => setBankMap(m => ({ ...m, accountType: v }))} />
                 <Sel label="رقم المرجع / الحوالة" headers={bankHeaders} value={bankMap.ref} onChange={v => setBankMap(m => ({ ...m, ref: v }))} />
@@ -2801,8 +2812,37 @@ export default function App() {
             {bankHeaders.length > 0 && (
               <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer w-fit">
                 <input type="checkbox" checked={bankSwap} onChange={e=>setBankSwap(e.target.checked)} className="rounded"/>
-                عكس المدين/الدائن (إذا جاءت الأنواع مقلوبة)
+                عكس المدين والدائن (إذا جاءت الأنواع مقلوبة)
               </label>
+            )}
+            {bankFileSnapshots.length > 0 && (
+              <div className="relative">
+                <button onClick={() => setShowBankSnapshots(v => !v)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-100 transition-colors">
+                  <RotateCcw className="w-3.5 h-3.5"/>استرجاع ملف سابق ({bankFileSnapshots.length})
+                </button>
+                {showBankSnapshots && (
+                  <>
+                    <div className="fixed inset-0 z-10" onClick={() => setShowBankSnapshots(false)} />
+                    <div className="absolute left-0 mt-1 w-72 bg-card border border-border rounded-lg shadow-lg z-20 py-1 text-xs max-h-72 overflow-y-auto">
+                      {bankFileSnapshots.map((s, i) => (
+                        <button key={i} onClick={() => {
+                          setBankH(s.headers); setBankRows(s.rows);
+                          setBankMap({ date:autoDetect(s.headers,HINTS.date), desc:autoDetect(s.headers,HINTS.desc), debit:autoDetect(s.headers,HINTS.debit), credit:autoDetect(s.headers,HINTS.credit), accountType:autoDetect(s.headers,HINTS.accountType), ref:autoDetect(s.headers,HINTS.ref) });
+                          setBankFileSessionId(id => id + 1);
+                          setShowBankSnapshots(false); setResults(null);
+                        }} className="w-full text-right px-4 py-2.5 hover:bg-slate-50 flex items-center gap-2 transition-colors">
+                          <RotateCcw className="w-3 h-3 text-slate-400"/>
+                          <div className="flex-1 min-w-0">
+                            <div className="truncate font-medium">{s.label}</div>
+                            <div className="text-[10px] text-muted-foreground">{s.savedAt} · {s.rows.length} صف</div>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
             )}
           </div>
           {!stageAInvoices.length && <div className="bg-card border p-4 rounded-xl space-y-4">
@@ -2812,7 +2852,7 @@ export default function App() {
               <div className="grid grid-cols-2 gap-2">
                 <Sel label="التاريخ" headers={cashHeaders} value={cashMap.date} onChange={v => setCashMap(m => ({ ...m, date: v }))} />
                 <Sel label="البيان" headers={cashHeaders} value={cashMap.name} onChange={v => setCashMap(m => ({ ...m, name: v }))} />
-                <Sel label="المبالغ المدفوعة (Debit)" headers={cashHeaders} value={cashMap.debit} onChange={v => setCashMap(m => ({ ...m, debit: v }))} />
+                <Sel label="المبالغ المدفوعة" headers={cashHeaders} value={cashMap.debit} onChange={v => setCashMap(m => ({ ...m, debit: v }))} />
                 <Sel label="المبالغ المستلمة (Credit)" headers={cashHeaders} value={cashMap.credit} onChange={v => setCashMap(m => ({ ...m, credit: v }))} />
                 <Sel label="نوع الحساب (بنك فلسطين / محفظة...)" headers={cashHeaders} value={cashMap.accountType} onChange={v => setCashMap(m => ({ ...m, accountType: v }))} />
                 <Sel label="رقم المرجع / الحوالة" headers={cashHeaders} value={cashMap.ref} onChange={v => setCashMap(m => ({ ...m, ref: v }))} />
@@ -2821,8 +2861,37 @@ export default function App() {
             {cashHeaders.length > 0 && (
               <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer w-fit">
                 <input type="checkbox" checked={cashSwap} onChange={e=>setCashSwap(e.target.checked)} className="rounded"/>
-                عكس المدين/الدائن (إذا جاءت الأنواع مقلوبة)
+                عكس المدين والدائن (إذا جاءت الأنواع مقلوبة)
               </label>
+            )}
+            {cashFileSnapshots.length > 0 && (
+              <div className="relative">
+                <button onClick={() => setShowCashSnapshots(v => !v)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-100 transition-colors">
+                  <RotateCcw className="w-3.5 h-3.5"/>استرجاع ملف سابق ({cashFileSnapshots.length})
+                </button>
+                {showCashSnapshots && (
+                  <>
+                    <div className="fixed inset-0 z-10" onClick={() => setShowCashSnapshots(false)} />
+                    <div className="absolute left-0 mt-1 w-72 bg-card border border-border rounded-lg shadow-lg z-20 py-1 text-xs max-h-72 overflow-y-auto">
+                      {cashFileSnapshots.map((s, i) => (
+                        <button key={i} onClick={() => {
+                          setCashH(s.headers); setCashRows(s.rows);
+                          setCashMap({ date:autoDetect(s.headers,HINTS.date), name:autoDetect(s.headers,HINTS.name), debit:autoDetect(s.headers,HINTS.debit), credit:autoDetect(s.headers,HINTS.credit), accountType:autoDetect(s.headers,HINTS.accountType), ref:autoDetect(s.headers,HINTS.ref) });
+                          setCashFileSessionId(id => id + 1);
+                          setShowCashSnapshots(false); setResults(null);
+                        }} className="w-full text-right px-4 py-2.5 hover:bg-slate-50 flex items-center gap-2 transition-colors">
+                          <RotateCcw className="w-3 h-3 text-slate-400"/>
+                          <div className="flex-1 min-w-0">
+                            <div className="truncate font-medium">{s.label}</div>
+                            <div className="text-[10px] text-muted-foreground">{s.savedAt} · {s.rows.length} صف</div>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
             )}
           </div>}
           <div className="bg-card border p-4 rounded-xl space-y-4">
@@ -2835,6 +2904,40 @@ export default function App() {
               <Sel label="المبالغ المستلمة" headers={walletBankHeaders} value={walletBankMap.credit} onChange={v => setWalletBankMap(m => ({ ...m, credit:v }))} />
               <Sel label="رقم المرجع / الحوالة" headers={walletBankHeaders} value={walletBankMap.ref} onChange={v => setWalletBankMap(m => ({ ...m, ref:v }))} />
             </div>}
+            {walletBankHeaders.length > 0 && (
+              <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer w-fit">
+                <input type="checkbox" checked={walletBankSwap} onChange={e=>setWalletBankSwap(e.target.checked)} className="rounded"/>
+                عكس المدين والدائن (إذا جاءت الأنواع مقلوبة)
+              </label>
+            )}
+            {walletBankFileSnapshots.length > 0 && (
+              <div className="relative">
+                <button onClick={() => setShowWalletBankSnapshots(v => !v)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-100 transition-colors">
+                  <RotateCcw className="w-3.5 h-3.5"/>استرجاع ملف سابق ({walletBankFileSnapshots.length})
+                </button>
+                {showWalletBankSnapshots && (
+                  <>
+                    <div className="fixed inset-0 z-10" onClick={() => setShowWalletBankSnapshots(false)} />
+                    <div className="absolute left-0 mt-1 w-72 bg-card border border-border rounded-lg shadow-lg z-20 py-1 text-xs max-h-72 overflow-y-auto">
+                      {walletBankFileSnapshots.map((s, i) => (
+                        <button key={i} onClick={() => {
+                          setWalletBankHeaders(s.headers); setWalletBankRows(s.rows);
+                          setWalletBankMap({ date:autoDetect(s.headers,HINTS.date), desc:autoDetect(s.headers,HINTS.desc), debit:autoDetect(s.headers,HINTS.debit), credit:autoDetect(s.headers,HINTS.credit), ref:autoDetect(s.headers,HINTS.ref) });
+                          setShowWalletBankSnapshots(false); setResults(null);
+                        }} className="w-full text-right px-4 py-2.5 hover:bg-slate-50 flex items-center gap-2 transition-colors">
+                          <RotateCcw className="w-3 h-3 text-slate-400"/>
+                          <div className="flex-1 min-w-0">
+                            <div className="truncate font-medium">{s.label}</div>
+                            <div className="text-[10px] text-muted-foreground">{s.savedAt} · {s.rows.length} صف</div>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
           </div>
           {!stageAInvoices.length && <div className="bg-card border p-4 rounded-xl space-y-4">
             <h2 className="font-semibold text-sm">🧾 كشف فواتير محفظة تجارية</h2>
@@ -2846,6 +2949,40 @@ export default function App() {
               <Sel label="المبالغ المستلمة" headers={walletCashHeaders} value={walletCashMap.credit} onChange={v => setWalletCashMap(m => ({ ...m, credit:v }))} />
               <Sel label="رقم المرجع / الحوالة" headers={walletCashHeaders} value={walletCashMap.ref} onChange={v => setWalletCashMap(m => ({ ...m, ref:v }))} />
             </div>}
+            {walletCashHeaders.length > 0 && (
+              <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer w-fit">
+                <input type="checkbox" checked={walletCashSwap} onChange={e=>setWalletCashSwap(e.target.checked)} className="rounded"/>
+                عكس المدين والدائن (إذا جاءت الأنواع مقلوبة)
+              </label>
+            )}
+            {walletCashFileSnapshots.length > 0 && (
+              <div className="relative">
+                <button onClick={() => setShowWalletCashSnapshots(v => !v)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-100 transition-colors">
+                  <RotateCcw className="w-3.5 h-3.5"/>استرجاع ملف سابق ({walletCashFileSnapshots.length})
+                </button>
+                {showWalletCashSnapshots && (
+                  <>
+                    <div className="fixed inset-0 z-10" onClick={() => setShowWalletCashSnapshots(false)} />
+                    <div className="absolute left-0 mt-1 w-72 bg-card border border-border rounded-lg shadow-lg z-20 py-1 text-xs max-h-72 overflow-y-auto">
+                      {walletCashFileSnapshots.map((s, i) => (
+                        <button key={i} onClick={() => {
+                          setWalletCashHeaders(s.headers); setWalletCashRows(s.rows);
+                          setWalletCashMap({ date:autoDetect(s.headers,HINTS.date), name:autoDetect(s.headers,HINTS.name), debit:autoDetect(s.headers,HINTS.debit), credit:autoDetect(s.headers,HINTS.credit), ref:autoDetect(s.headers,HINTS.ref) });
+                          setShowWalletCashSnapshots(false); setResults(null);
+                        }} className="w-full text-right px-4 py-2.5 hover:bg-slate-50 flex items-center gap-2 transition-colors">
+                          <RotateCcw className="w-3 h-3 text-slate-400"/>
+                          <div className="flex-1 min-w-0">
+                            <div className="truncate font-medium">{s.label}</div>
+                            <div className="text-[10px] text-muted-foreground">{s.savedAt} · {s.rows.length} صف</div>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
           </div>}
         </div>
 
